@@ -11,6 +11,7 @@ use songbird::{
 pub enum SongError {
     NoGuild,
     NoVoiceChannel,
+    NoVoiceConnection,
 }
 
 impl std::fmt::Display for SongError {
@@ -18,6 +19,7 @@ impl std::fmt::Display for SongError {
         match self {
             Self::NoGuild => f.write_str("Song feature requires guild to use voice chat."),
             Self::NoVoiceChannel => f.write_str("Cannot find voice channel from request."),
+            Self::NoVoiceConnection => f.write_str("Bot is not connected to the voice channel."),
         }
     }
 }
@@ -108,7 +110,7 @@ pub async fn handle_play(
 #[poise::command(
     slash_command,
     guild_only,
-    subcommands("join", "leave", "play", "stop", "skip", "pause"),
+    subcommands("join", "leave", "play", "stop", "skip"),
     subcommand_required
 )]
 pub async fn song(_: Context<'_>) -> Result<(), Error> {
@@ -151,16 +153,16 @@ pub async fn play(
 }
 
 #[poise::command(slash_command)]
-pub async fn stop(_: Context<'_>) -> Result<(), Error> {
+pub async fn stop(ctx: Context<'_>) -> Result<(), Error> {
+    let call = get_internal(ctx.serenity_context(), ctx.guild_id().unwrap())
+        .await
+        .ok_or(Box::new(SongError::NoVoiceConnection))?;
+    let mut call = call.lock().await;
+    call.stop();
     Ok(())
 }
 
 #[poise::command(slash_command)]
 pub async fn skip(_: Context<'_>) -> Result<(), Error> {
-    Ok(())
-}
-
-#[poise::command(slash_command)]
-pub async fn pause(_: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
