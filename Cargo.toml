@@ -1,0 +1,25 @@
+[package]
+name = "ui-chan"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+poise = "0.6"
+songbird = { version = "0.4", features = ["builtin-queue"] }
+symphonia = { version = "0.5", features = ["aac", "mp3", "isomp4", "alac"] }
+tokio = { version = "1.21.2", features = [
+    "macros",
+    "rt-multi-thread",
+    "signal",
+] }
+dotenv = "0.15"
+tracing = "0.1.23"
+tracing-subscriber = "0.3"
+rand = "0.8"
+serde = "1.0"
+serde_json = "1.0"
+bitflags = "2.5"
+chrono = "0.4"
+reqwest = "0.11"
