@@ -11,7 +11,6 @@ use songbird::{
 pub enum SongError {
     NoGuild,
     NoVoiceChannel,
-    NoConnection,
 }
 
 impl std::fmt::Display for SongError {
@@ -77,10 +76,10 @@ pub async fn init_call(call: Arc<Mutex<Call>>) -> Result<(), Error> {
 pub async fn handle_play(
     ctx: &serenity::Context,
     data: &Data,
-    message: &serenity::Message,
+    url: String,
+    guild_id: serenity::GuildId,
+    author_id: serenity::UserId,
 ) -> Result<(), Error> {
-    let url = message.content.clone();
-
     let mut src = if url.starts_with("http") {
         YoutubeDl::new(data.http_client.clone(), url)
     } else {
@@ -88,7 +87,7 @@ pub async fn handle_play(
     };
 
     {
-        let call_mutex = join_internal(ctx, message.guild_id.unwrap(), message.author.id).await?;
+        let call_mutex = join_internal(ctx, guild_id, author_id).await?;
         let mut call = call_mutex.lock().await;
 
         call.play_only_input(src.clone().into());
@@ -117,19 +116,38 @@ pub async fn song(_: Context<'_>) -> Result<(), Error> {
 }
 
 #[poise::command(slash_command)]
-pub async fn join(_: Context<'_>) -> Result<(), Error> {
-    // join_internal(ctx.serenity_context(), ctx.data());
+pub async fn join(ctx: Context<'_>) -> Result<(), Error> {
+    join_internal(
+        ctx.serenity_context(),
+        ctx.guild_id().unwrap(),
+        ctx.author().id,
+    )
+    .await?;
     Ok(())
 }
 
 #[poise::command(slash_command)]
-pub async fn leave(_: Context<'_>) -> Result<(), Error> {
+pub async fn leave(ctx: Context<'_>) -> Result<(), Error> {
+    if let Some(call) = get_internal(ctx.serenity_context(), ctx.guild_id().unwrap()).await {
+        let mut call = call.lock().await;
+        call.leave().await?;
+    }
     Ok(())
 }
 
 #[poise::command(slash_command)]
-pub async fn play(_: Context<'_>) -> Result<(), Error> {
-    Ok(())
+pub async fn play(
+    ctx: Context<'_>,
+    #[description = "유튜브 URL 또는 검색어"] url: String,
+) -> Result<(), Error> {
+    handle_play(
+        ctx.serenity_context(),
+        ctx.data(),
+        url,
+        ctx.guild_id().unwrap(),
+        ctx.author().id,
+    )
+    .await
 }
 
 #[poise::command(slash_command)]

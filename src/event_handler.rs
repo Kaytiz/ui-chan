@@ -37,7 +37,15 @@ pub async fn event_handler(
                     };
 
                     if is_song {
-                        if let Err(err) = command::song::handle_play(ctx, data, new_message).await {
+                        if let Err(err) = command::song::handle_play(
+                            ctx,
+                            data,
+                            new_message.content.clone(),
+                            guild_id,
+                            new_message.author.id,
+                        )
+                        .await
+                        {
                             new_message.reply(ctx, &format!("error: {}", err)).await?;
                         }
                     }
