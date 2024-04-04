@@ -17,4 +17,4 @@ Cargo.lock
 .env
 
 # amumu bot files
-data
+.data

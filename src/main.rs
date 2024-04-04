@@ -4,6 +4,8 @@ pub mod prelude;
 mod command;
 mod event_handler;
 
+use std::sync::Arc;
+
 use prelude::*;
 use songbird::SerenityInit;
 
@@ -27,10 +29,6 @@ async fn main() {
                 command::owner::channel::channel(),
                 command::user::user(),
                 command::song::song(),
-                command::dev::age(),
-                command::dev::rand(),
-                command::dev::modal(),
-                command::dev::add(),
             ],
             event_handler: |ctx, event, framework, data| {
                 Box::pin(event_handler::event_handler(ctx, event, framework, data))
@@ -40,7 +38,7 @@ async fn main() {
         .setup(|ctx, _ready, framework| {
             Box::pin(async move {
                 poise::builtins::register_globally(ctx, &framework.options().commands).await?;
-                Ok(Data::load_default().unwrap_or_default())
+                Ok(Data)
             })
         })
         .build();
@@ -55,6 +53,16 @@ async fn main() {
         .register_songbird()
         .await
         .expect("Err creating client");
+
+    {
+        let mut data = client.data.write().await;
+        data.insert::<data::SharedKey>(Arc::new(data::Shared {
+            http_client: reqwest::Client::new(),
+        }));
+        data.insert::<data::StorageKey>(Arc::new(tokio::sync::Mutex::new(
+            data::Storage::load_default().unwrap_or_default(),
+        )));
+    }
 
     let shard_manager = client.shard_manager.clone();
     tokio::spawn(async move {

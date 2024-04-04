@@ -1,11 +1,8 @@
-use std::sync::Arc;
-use tokio::sync::Mutex;
+use poise::serenity_prelude::async_trait;
+use songbird::input::Compose;
+use std::{collections::VecDeque, sync::Arc};
 
-use crate::prelude::*;
-use songbird::{
-    input::{Compose, YoutubeDl},
-    Call,
-};
+use crate::{data, prelude::*};
 
 #[derive(Debug)]
 pub enum SongError {
@@ -26,10 +23,43 @@ impl std::fmt::Display for SongError {
 
 impl std::error::Error for SongError {}
 
+struct TrackEndHandler {
+    context: serenity::Context,
+    guild_id: serenity::GuildId,
+}
+
+#[async_trait]
+impl songbird::EventHandler for TrackEndHandler {
+    async fn act(&self, _: &songbird::EventContext<'_>) -> Option<songbird::Event> {
+        next_internal(&self.context, self.guild_id).await;
+        None
+    }
+}
+
+struct DisconnectHandler {
+    context: serenity::Context,
+    guild_id: serenity::GuildId,
+}
+
+#[async_trait]
+impl songbird::EventHandler for DisconnectHandler {
+    async fn act(&self, _: &songbird::EventContext<'_>) -> Option<songbird::Event> {
+        self.context.shard.set_activity(None);
+        now_complete(&self.context, self.guild_id).await.ok();
+        queue_clear(&self.context, self.guild_id).await.ok();
+        None
+    }
+}
+
+pub enum SongCommandResult {
+    Play,
+    Queue,
+}
+
 pub async fn get_internal(
     ctx: &serenity::Context,
     guild_id: serenity::GuildId,
-) -> Option<Arc<Mutex<Call>>> {
+) -> Option<Arc<tokio::sync::Mutex<songbird::Call>>> {
     let manager = songbird::get(ctx).await.unwrap().clone();
     manager.get(guild_id)
 }
@@ -38,7 +68,7 @@ pub async fn join_internal(
     ctx: &serenity::Context,
     guild_id: serenity::GuildId,
     author_id: serenity::UserId,
-) -> Result<Arc<Mutex<Call>>, Error> {
+) -> Result<Arc<tokio::sync::Mutex<songbird::Call>>, Error> {
     let (guild_id, channel_id) = {
         let guild = match ctx.cache.guild(guild_id) {
             Some(guild) => guild,
@@ -61,47 +91,258 @@ pub async fn join_internal(
                     return Ok(call);
                 }
             }
-            let call = manager.join(guild_id, channel_id).await?;
-            init_call(call.clone()).await?;
-            Ok(call)
+            let call_ptr = manager.join(guild_id, channel_id).await?;
+
+            // Initialize Call
+            {
+                let mut call = call_ptr.lock().await;
+                call.deafen(true).await?;
+                call.add_global_event(
+                    songbird::Event::Core(songbird::CoreEvent::DriverDisconnect),
+                    DisconnectHandler {
+                        context: ctx.clone(),
+                        guild_id,
+                    },
+                )
+            }
+
+            Ok(call_ptr)
         }
         None => Err(SongError::NoVoiceChannel.into()),
     }
 }
 
-pub async fn init_call(call: Arc<Mutex<Call>>) -> Result<(), Error> {
-    let mut call = call.lock().await;
-    call.deafen(true).await?;
+pub async fn join_or_get(
+    ctx: &serenity::Context,
+    guild_id: serenity::GuildId,
+    author_id: Option<serenity::UserId>,
+) -> Result<Arc<tokio::sync::Mutex<songbird::Call>>, Error> {
+    if let Some(author_id) = author_id {
+        let call = join_internal(ctx, guild_id, author_id).await;
+        if call.is_ok() {
+            return call;
+        }
+    }
+
+    get_internal(ctx, guild_id)
+        .await
+        .ok_or(SongError::NoVoiceConnection.into())
+}
+
+pub async fn now_take(
+    ctx: &serenity::Context,
+    guild_id: serenity::GuildId,
+) -> Option<data::song::Now> {
+    let storage = data::Storage::get(ctx).await;
+    let mut storage = storage.lock().await;
+    let guild = storage.guild_mut(guild_id);
+    let current = guild.song_now.take();
+    current
+}
+
+pub async fn now_complete(
+    ctx: &serenity::Context,
+    guild_id: serenity::GuildId,
+) -> Result<(), Error> {
+    if let Some(now) = now_take(ctx, guild_id).await {
+        now.request.react_done(ctx).await?;
+    }
     Ok(())
 }
 
-pub async fn handle_play(
+pub async fn queue_clear(
     ctx: &serenity::Context,
-    data: &Data,
-    url: String,
     guild_id: serenity::GuildId,
-    author_id: serenity::UserId,
 ) -> Result<(), Error> {
-    let mut src = if url.starts_with("http") {
-        YoutubeDl::new(data.http_client.clone(), url)
-    } else {
-        YoutubeDl::new_search(data.http_client.clone(), url)
+    let song_queue = {
+        // clear queue
+        let storage = data::Storage::get(ctx).await;
+        let mut storage = storage.lock().await;
+        let guild = storage.guild_mut(guild_id);
+        let mut song_queue: VecDeque<data::song::Request> = VecDeque::new();
+        std::mem::swap(&mut song_queue, &mut guild.song_queue);
+        song_queue
     };
 
-    {
-        let call_mutex = join_internal(ctx, guild_id, author_id).await?;
-        let mut call = call_mutex.lock().await;
-
-        call.play_only_input(src.clone().into());
+    for request in song_queue {
+        request.remove_react_queue(ctx).await?;
     }
 
-    if let Some(title) = src
-        .aux_metadata()
-        .await
-        .ok()
-        .and_then(|metadata| metadata.title)
+    Ok(())
+}
+
+pub async fn play_internal(
+    ctx: &serenity::Context,
+    request: data::song::Request,
+) -> Result<songbird::tracks::TrackHandle, Error> {
+    let shared = data::Shared::get(ctx).await;
+
+    let mut src = if request.url.starts_with("http") {
+        songbird::input::YoutubeDl::new(shared.http_client.clone(), request.url.clone())
+    } else {
+        songbird::input::YoutubeDl::new_search(shared.http_client.clone(), request.url.clone())
+    };
+
+    let handle = {
+        let call = join_or_get(ctx, request.guild_id, Some(request.author_id)).await?;
+        let mut call = call.lock().await;
+        call.play_only_input(src.clone().into())
+    };
+
+    let metadata = src.aux_metadata().await?;
+
+    if let Some(title) = metadata.title.as_deref() {
+        ctx.set_activity(Some(serenity::ActivityData::listening(title)))
+    }
+
+    handle.add_event(
+        songbird::Event::Track(songbird::TrackEvent::End),
+        TrackEndHandler {
+            context: ctx.clone(),
+            guild_id: request.guild_id,
+        },
+    )?;
+
+    // update song playing message
+    now_complete(ctx, request.guild_id).await?;
+
+    request.react_playing(ctx).await?;
+
+    // let channel_song = {
+    //     let storage = data::Storage::get(ctx).await;
+    //     let storage = storage.lock().unwrap();
+    //     storage
+    //         .guild(request.guild_id)
+    //         .and_then(|guild| guild.channel_song)
+    // };
+
+    // if let Some(channel_song) = channel_song {
+    //     let footer = serenity::CreateEmbedFooter::new(&Config::get().embed_footer);
+
+    //     let title = format!(
+    //         "{}{}",
+    //         Config::get().embed_song_now_title,
+    //         metadata.title.to_owned().unwrap_or_default()
+    //     );
+
+    //     let author = if let (Some(album), Some(artist)) =
+    //         (metadata.album.as_ref(), metadata.artist.as_ref())
+    //     {
+    //         Some(format!("{} - {}", album, artist))
+    //     } else {
+    //         metadata.channel.to_owned()
+    //     };
+
+    //     let date = metadata.date.to_owned().unwrap_or_default();
+
+    //     let duration = metadata
+    //         .duration
+    //         .as_ref()
+    //         .map(|duration| format!("{}s", duration.as_secs()))
+    //         .unwrap_or_default();
+
+    //     let embed = serenity::CreateEmbed::new()
+    //         .title(title)
+    //         .description(author.unwrap_or_default())
+    //         .fields(vec![("date", date, true), ("duration", duration, true)])
+    //         .image(metadata.thumbnail.to_owned().unwrap_or_default())
+    //         .footer(footer)
+    //         .timestamp(serenity::Timestamp::now());
+
+    //     let builder = serenity::CreateMessage::new().embed(embed);
+
+    //     let message = builder
+    //         .execute(ctx, (channel_song, Some(request.guild_id)))
+    //         .await?;
+    //     {
+    //         let storage = data::Storage::get(ctx).await;
+    //         let mut storage = storage.lock().unwrap();
+    //         let guild = storage.guild_mut(request.guild_id);
+    //         guild.song_now = Some(data::song::Now::new(handle.clone(), &message, request));
+    //         storage.save_default().ok();
+    //     }
+    // }
+    //
+
     {
-        ctx.set_activity(Some(serenity::ActivityData::listening(title)));
+        let storage = data::Storage::get(ctx).await;
+        let mut storage = storage.lock().await;
+        let guild = storage.guild_mut(request.guild_id);
+        guild.song_now = Some(data::song::Now::new(handle.clone(), request));
+        storage.save_default().ok();
+    }
+
+    Ok(handle)
+}
+
+pub async fn queue_internal(
+    ctx: &serenity::Context,
+    message: &serenity::Message,
+) -> Result<SongCommandResult, Error> {
+    let request = data::song::Request::from(message);
+    let guild_id = request.guild_id;
+
+    let song_lock = {
+        let storage = data::Storage::get(ctx).await;
+        let mut storage = storage.lock().await;
+        let guild = storage.guild_mut(request.guild_id);
+        guild.song_lock.clone()
+    };
+
+    let _song_lock = song_lock.lock().await;
+
+    request.react_queue(ctx).await?;
+
+    let first_queue = {
+        let storage = data::Storage::get(ctx).await;
+        let mut storage = storage.lock().await;
+        let guild = storage.guild_mut(request.guild_id);
+        guild.song_queue.push_back(request);
+        guild.song_queue.len() == 1 && guild.song_now.is_none()
+    };
+
+    if first_queue {
+        next_internal(ctx, guild_id).await?;
+        Ok(SongCommandResult::Play)
+    } else {
+        Ok(SongCommandResult::Queue)
+    }
+}
+
+pub async fn stop_internal(
+    ctx: &serenity::Context,
+    guild_id: serenity::GuildId,
+) -> Result<(), Error> {
+    let call = get_internal(ctx, guild_id)
+        .await
+        .ok_or(Box::new(SongError::NoVoiceConnection))?;
+    let mut call = call.lock().await;
+    call.stop();
+
+    now_complete(ctx, guild_id).await?;
+    queue_clear(ctx, guild_id).await?;
+
+    Ok(())
+}
+
+pub async fn next_internal(
+    ctx: &serenity::Context,
+    guild_id: serenity::GuildId,
+) -> Result<(), Error> {
+    let next = {
+        let storage = data::Storage::get(ctx).await;
+        let mut storage = storage.lock().await;
+        let guild = storage.guild_mut(guild_id);
+        guild.song_queue.pop_front()
+    };
+
+    match next {
+        Some(next) => {
+            play_internal(ctx, next).await?;
+        }
+        None => {
+            stop_internal(ctx, guild_id).await?;
+        }
     }
 
     Ok(())
@@ -110,7 +351,7 @@ pub async fn handle_play(
 #[poise::command(
     slash_command,
     guild_only,
-    subcommands("join", "leave", "play", "stop", "skip"),
+    subcommands("join", "leave", "stop", "next"),
     subcommand_required
 )]
 pub async fn song(_: Context<'_>) -> Result<(), Error> {
@@ -125,44 +366,31 @@ pub async fn join(ctx: Context<'_>) -> Result<(), Error> {
         ctx.author().id,
     )
     .await?;
+    ctx.reply("join").await?;
     Ok(())
 }
 
 #[poise::command(slash_command)]
 pub async fn leave(ctx: Context<'_>) -> Result<(), Error> {
     if let Some(call) = get_internal(ctx.serenity_context(), ctx.guild_id().unwrap()).await {
-        let mut call = call.lock().await;
-        call.leave().await?;
+        {
+            let mut call = call.lock().await;
+            call.leave().await?;
+        }
+        ctx.reply("leave").await?;
     }
     Ok(())
 }
 
 #[poise::command(slash_command)]
-pub async fn play(
-    ctx: Context<'_>,
-    #[description = "유튜브 URL 또는 검색어"] url: String,
-) -> Result<(), Error> {
-    handle_play(
-        ctx.serenity_context(),
-        ctx.data(),
-        url,
-        ctx.guild_id().unwrap(),
-        ctx.author().id,
-    )
-    .await
-}
-
-#[poise::command(slash_command)]
 pub async fn stop(ctx: Context<'_>) -> Result<(), Error> {
-    let call = get_internal(ctx.serenity_context(), ctx.guild_id().unwrap())
-        .await
-        .ok_or(Box::new(SongError::NoVoiceConnection))?;
-    let mut call = call.lock().await;
-    call.stop();
-    Ok(())
+    ctx.reply("song stop").await?;
+    stop_internal(ctx.serenity_context(), ctx.guild_id().unwrap()).await
 }
 
 #[poise::command(slash_command)]
-pub async fn skip(_: Context<'_>) -> Result<(), Error> {
+pub async fn next(ctx: Context<'_>) -> Result<(), Error> {
+    ctx.reply("song next").await?;
+    next_internal(ctx.serenity_context(), ctx.guild_id().unwrap()).await;
     Ok(())
 }

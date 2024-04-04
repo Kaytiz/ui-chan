@@ -1,46 +1,35 @@
 use crate::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     mem,
-    sync::{atomic::AtomicU32, Mutex},
+    sync::Arc,
 };
 
-pub struct Data {
-    pub storage: Mutex<Storage>,
+pub mod song;
+
+pub struct Data;
+
+pub struct SharedKey;
+
+impl serenity::prelude::TypeMapKey for SharedKey {
+    type Value = Arc<Shared>;
+}
+
+pub struct Shared {
     pub http_client: reqwest::Client,
-    pub poise_mentions: AtomicU32,
 }
 
-impl Data {
-    pub fn load(filename: &str) -> Result<Self, Error> {
-        Ok(Self {
-            storage: Mutex::new(Storage::from_file(filename)?),
-            ..Default::default()
-        })
-    }
-
-    pub fn save(&self, filename: &str) -> Result<(), Error> {
-        self.storage.lock().unwrap().to_file(filename)
-    }
-
-    pub fn load_default() -> Result<Self, Error> {
-        Data::load(DEFAULT_DATA_FILENAME)
-    }
-
-    pub fn save_default(&self) -> Result<(), Error> {
-        self.save(DEFAULT_DATA_FILENAME)
+impl Shared {
+    pub async fn get(ctx: &serenity::Context) -> Arc<Self> {
+        ctx.data.read().await.get::<SharedKey>().unwrap().clone()
     }
 }
 
-impl Default for Data {
-    fn default() -> Self {
-        Data {
-            storage: Mutex::new(Storage::default()),
-            http_client: reqwest::Client::new(),
-            poise_mentions: AtomicU32::new(0),
-        }
-    }
+pub struct StorageKey;
+
+impl serenity::prelude::TypeMapKey for StorageKey {
+    type Value = Arc<tokio::sync::Mutex<Storage>>;
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -49,7 +38,11 @@ pub struct Storage {
 }
 
 impl Storage {
-    pub fn from_file(filename: &str) -> Result<Self, Error> {
+    pub async fn get(ctx: &serenity::Context) -> Arc<tokio::sync::Mutex<Self>> {
+        ctx.data.read().await.get::<StorageKey>().unwrap().clone()
+    }
+
+    pub fn load(filename: &str) -> Result<Self, Error> {
         if std::path::Path::new(filename).exists() {
             let file = std::fs::File::open(filename)?;
             let reader = std::io::BufReader::new(file);
@@ -60,12 +53,20 @@ impl Storage {
         }
     }
 
-    pub fn to_file(&self, filename: &str) -> Result<(), Error> {
+    pub fn save(&self, filename: &str) -> Result<(), Error> {
         let file = std::fs::File::create(filename)?;
         let writer = std::io::BufWriter::new(file);
         let mut ser = serde_json::Serializer::pretty(writer);
         self.serialize(&mut ser)?;
         Ok(())
+    }
+
+    pub fn load_default() -> Result<Self, Error> {
+        Storage::load(DEFAULT_DATA_FILENAME)
+    }
+
+    pub fn save_default(&self) -> Result<(), Error> {
+        self.save(DEFAULT_DATA_FILENAME)
     }
 
     pub fn guild(&self, guild_id: serenity::GuildId) -> Option<&Guild> {
@@ -106,11 +107,21 @@ impl Storage {
     }
 }
 
-#[derive(Serialize, Deserialize, Default, Debug)]
+#[derive(Serialize, Deserialize, Default)]
 pub struct Guild {
     pub channels: HashMap<serenity::ChannelId, Channel>,
     pub channel_notify: Option<serenity::ChannelId>,
+    pub channel_song: Option<serenity::ChannelId>,
     pub users: HashMap<serenity::UserId, User>,
+
+    #[serde(skip)]
+    pub song_lock: Arc<tokio::sync::Mutex<()>>,
+
+    #[serde(skip)]
+    pub song_now: Option<song::Now>,
+
+    #[serde(skip)]
+    pub song_queue: VecDeque<song::Request>,
 }
 
 impl Guild {
@@ -131,7 +142,7 @@ impl Guild {
     }
 }
 
-#[derive(Serialize, Deserialize, Default, Debug)]
+#[derive(Serialize, Deserialize, Default)]
 pub struct Channel {
     pub properties: Vec<channel::Property>,
 }
@@ -161,10 +172,19 @@ impl Channel {
 pub mod channel {
     use serde::{Deserialize, Serialize};
 
-    #[derive(Serialize, Deserialize, Debug)]
+    #[derive(Serialize, Deserialize)]
     pub enum Property {
         Song,
         Attribute(String),
+    }
+
+    impl std::fmt::Display for Property {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                Self::Song => write!(f, "Song"),
+                Self::Attribute(attr) => write!(f, "Attribute({attr})"),
+            }
+        }
     }
 
     pub fn is_song(property: &Property) -> bool {
@@ -176,8 +196,21 @@ pub mod channel {
     }
 }
 
-#[derive(Serialize, Deserialize, Default, Clone, Debug)]
+#[derive(Serialize, Deserialize, Default, Clone)]
 pub struct User {
     pub birthday: Option<chrono::NaiveDate>,
     pub phone_number: Option<String>,
+}
+
+impl std::fmt::Display for User {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut properties = Vec::new();
+        if let Some(birthday) = self.birthday.as_ref() {
+            properties.push(format!("birthday : {}", birthday));
+        }
+        if let Some(phone_number) = self.phone_number.as_ref() {
+            properties.push(format!("phone_number : {}", phone_number));
+        }
+        write!(f, "{}", properties.join(", "))
+    }
 }

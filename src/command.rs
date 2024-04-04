@@ -1,6 +1,5 @@
 use crate::prelude::*;
 
-pub mod dev;
 pub mod owner;
 pub mod song;
 pub mod user;
@@ -9,7 +8,7 @@ pub mod user;
 #[poise::command(slash_command, track_edits)]
 pub async fn help(
     ctx: Context<'_>,
-    #[description = "설명을 보고싶은 커맨드"]
+    #[description = "설명을 보고 싶은 커맨드"]
     #[autocomplete = poise::builtins::autocomplete_command]
     command: Option<String>,
 ) -> Result<(), Error> {

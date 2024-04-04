@@ -3,6 +3,7 @@ use std::str::FromStr;
 use chrono::NaiveDate;
 use poise::Modal;
 
+use crate::data;
 use crate::prelude::*;
 
 #[poise::command(
@@ -22,12 +23,13 @@ pub async fn info(ctx: Context<'_>, target: Option<serenity::UserId>) -> Result<
     let user_id = target.unwrap_or(ctx.author().id);
 
     let user = {
-        let storage = ctx.data().storage.lock().unwrap();
+        let storage = data::Storage::get(ctx.serenity_context()).await;
+        let storage = storage.lock().await;
         storage.user(guild_id, user_id).cloned()
     };
 
     match user {
-        Some(user) => ctx.reply(format!("{:?}", user)).await?,
+        Some(user) => ctx.reply(format!("{}", user)).await?,
         None => ctx.reply("no user data").await?,
     };
 
@@ -51,7 +53,8 @@ pub async fn edit(ctx: ApplicationContext<'_>) -> Result<(), Error> {
     let user_id = ctx.author().id;
 
     let defaults = {
-        let storage = ctx.data().storage.lock().unwrap();
+        let storage = data::Storage::get(ctx.serenity_context()).await;
+        let storage = storage.lock().await;
         match storage.user(guild_id, user_id) {
             Some(user) => {
                 let birthday = user.birthday.map(|date| date.to_string());
@@ -69,14 +72,19 @@ pub async fn edit(ctx: ApplicationContext<'_>) -> Result<(), Error> {
 
     if let Some(data) = data {
         {
-            let mut storage = ctx.data().storage.lock().unwrap();
+            let storage = data::Storage::get(ctx.serenity_context()).await;
+            let mut storage = storage.lock().await;
             let user = storage.user_mut(guild_id, user_id);
             user.birthday = data
                 .birthday
                 .and_then(|date_str| NaiveDate::from_str(&date_str).ok());
             user.phone_number = data.phone_number;
         }
-        ctx.data().save_default()?;
+        data::Storage::get(ctx.serenity_context())
+            .await
+            .lock()
+            .await
+            .save_default()?;
         ctx.reply("updated!").await?;
     }
 
