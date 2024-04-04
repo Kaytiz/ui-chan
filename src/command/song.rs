@@ -6,17 +6,17 @@ use crate::{data, prelude::*};
 
 #[derive(Debug)]
 pub enum SongError {
-    NoGuild,
-    NoVoiceChannel,
-    NoVoiceConnection,
+    Guild,
+    VoiceChannel,
+    VoiceConnection,
 }
 
 impl std::fmt::Display for SongError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NoGuild => f.write_str("Song feature requires guild to use voice chat."),
-            Self::NoVoiceChannel => f.write_str("Cannot find voice channel from request."),
-            Self::NoVoiceConnection => f.write_str("Bot is not connected to the voice channel."),
+            Self::Guild => f.write_str("Song feature requires guild to use voice chat."),
+            Self::VoiceChannel => f.write_str("Cannot find voice channel from request."),
+            Self::VoiceConnection => f.write_str("Bot is not connected to the voice channel."),
         }
     }
 }
@@ -31,7 +31,7 @@ struct TrackEndHandler {
 #[async_trait]
 impl songbird::EventHandler for TrackEndHandler {
     async fn act(&self, _: &songbird::EventContext<'_>) -> Option<songbird::Event> {
-        next_internal(&self.context, self.guild_id).await;
+        next_internal(&self.context, self.guild_id).await.ok();
         None
     }
 }
@@ -72,7 +72,7 @@ pub async fn join_internal(
     let (guild_id, channel_id) = {
         let guild = match ctx.cache.guild(guild_id) {
             Some(guild) => guild,
-            None => return Err(SongError::NoGuild.into()),
+            None => return Err(SongError::Guild.into()),
         };
         let channel_id = guild
             .voice_states
@@ -108,7 +108,7 @@ pub async fn join_internal(
 
             Ok(call_ptr)
         }
-        None => Err(SongError::NoVoiceChannel.into()),
+        None => Err(SongError::VoiceChannel.into()),
     }
 }
 
@@ -126,7 +126,7 @@ pub async fn join_or_get(
 
     get_internal(ctx, guild_id)
         .await
-        .ok_or(SongError::NoVoiceConnection.into())
+        .ok_or(SongError::VoiceConnection.into())
 }
 
 pub async fn now_take(
@@ -136,8 +136,7 @@ pub async fn now_take(
     let storage = data::Storage::get(ctx).await;
     let mut storage = storage.lock().await;
     let guild = storage.guild_mut(guild_id);
-    let current = guild.song_now.take();
-    current
+    guild.song_now.take()
 }
 
 pub async fn now_complete(
@@ -208,62 +207,6 @@ pub async fn play_internal(
 
     request.react_playing(ctx).await?;
 
-    // let channel_song = {
-    //     let storage = data::Storage::get(ctx).await;
-    //     let storage = storage.lock().unwrap();
-    //     storage
-    //         .guild(request.guild_id)
-    //         .and_then(|guild| guild.channel_song)
-    // };
-
-    // if let Some(channel_song) = channel_song {
-    //     let footer = serenity::CreateEmbedFooter::new(&Config::get().embed_footer);
-
-    //     let title = format!(
-    //         "{}{}",
-    //         Config::get().embed_song_now_title,
-    //         metadata.title.to_owned().unwrap_or_default()
-    //     );
-
-    //     let author = if let (Some(album), Some(artist)) =
-    //         (metadata.album.as_ref(), metadata.artist.as_ref())
-    //     {
-    //         Some(format!("{} - {}", album, artist))
-    //     } else {
-    //         metadata.channel.to_owned()
-    //     };
-
-    //     let date = metadata.date.to_owned().unwrap_or_default();
-
-    //     let duration = metadata
-    //         .duration
-    //         .as_ref()
-    //         .map(|duration| format!("{}s", duration.as_secs()))
-    //         .unwrap_or_default();
-
-    //     let embed = serenity::CreateEmbed::new()
-    //         .title(title)
-    //         .description(author.unwrap_or_default())
-    //         .fields(vec![("date", date, true), ("duration", duration, true)])
-    //         .image(metadata.thumbnail.to_owned().unwrap_or_default())
-    //         .footer(footer)
-    //         .timestamp(serenity::Timestamp::now());
-
-    //     let builder = serenity::CreateMessage::new().embed(embed);
-
-    //     let message = builder
-    //         .execute(ctx, (channel_song, Some(request.guild_id)))
-    //         .await?;
-    //     {
-    //         let storage = data::Storage::get(ctx).await;
-    //         let mut storage = storage.lock().unwrap();
-    //         let guild = storage.guild_mut(request.guild_id);
-    //         guild.song_now = Some(data::song::Now::new(handle.clone(), &message, request));
-    //         storage.save_default().ok();
-    //     }
-    // }
-    //
-
     {
         let storage = data::Storage::get(ctx).await;
         let mut storage = storage.lock().await;
@@ -315,7 +258,7 @@ pub async fn stop_internal(
 ) -> Result<(), Error> {
     let call = get_internal(ctx, guild_id)
         .await
-        .ok_or(Box::new(SongError::NoVoiceConnection))?;
+        .ok_or(Box::new(SongError::VoiceConnection))?;
     let mut call = call.lock().await;
     call.stop();
 
@@ -391,6 +334,6 @@ pub async fn stop(ctx: Context<'_>) -> Result<(), Error> {
 #[poise::command(slash_command)]
 pub async fn next(ctx: Context<'_>) -> Result<(), Error> {
     ctx.reply("song next").await?;
-    next_internal(ctx.serenity_context(), ctx.guild_id().unwrap()).await;
+    next_internal(ctx.serenity_context(), ctx.guild_id().unwrap()).await?;
     Ok(())
 }
