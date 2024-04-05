@@ -92,13 +92,18 @@ impl Guild {
         }
     }
 
-    fn make_file_path(guild_id: serenity::GuildId) -> String {
-        format!("./data/{}", guild_id.to_string())
+    const FILE_DIR: &'static str = "./data";
+
+    fn file_name(guild_id: serenity::GuildId) -> String {
+        guild_id.to_string()
     }
 
     pub async fn load(guild_id: serenity::GuildId) -> Result<Self, Error> {
-        let file_path = Self::make_file_path(guild_id);
-        let mut file = tokio::fs::File::open(&file_path).await?;
+        let file_dir = std::path::Path::new(Self::FILE_DIR);
+        let file_name = Self::file_name(guild_id);
+        let file_path = file_dir.join(&file_name);
+
+        let mut file = tokio::fs::File::open(file_path).await?;
         let mut str = String::new();
         file.read_to_string(&mut str).await?;
         let mut data: Self = serde_json::from_str(&str)?;
@@ -107,7 +112,11 @@ impl Guild {
     }
 
     pub async fn save(&self) -> Result<(), Error> {
-        let file_path = Self::make_file_path(self.id);
+        let file_dir = std::path::Path::new(Self::FILE_DIR);
+        let file_name = Self::file_name(self.id);
+        let file_path = file_dir.join(&file_name);
+
+        tokio::fs::create_dir_all(file_dir).await?;
         let mut file = tokio::fs::File::create(file_path).await?;
         let file_str = serde_json::to_string_pretty(&self)?;
         file.write_all(file_str.as_bytes()).await?;
