@@ -178,12 +178,9 @@ impl Guild {
 
         let ctx = ctx.clone();
         tokio::spawn(async move {
-            futures::future::join_all(
-                song_queue
-                    .iter()
-                    .map(|request| request.remove_react_queue(&ctx)),
-            )
-            .await;
+            for request in song_queue {
+                request.remove_react_queue(&ctx).await.ok();
+            }
         });
     }
 }

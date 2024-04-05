@@ -13,7 +13,6 @@ impl Request {
     const REACT_QUEUE: char = '🔖';
     const REACT_PLAYING: char = '🎵';
     const REACT_DONE: char = '✅';
-    const REACTS_ALL: [char; 3] = [Self::REACT_QUEUE, Self::REACT_PLAYING, Self::REACT_DONE];
 
     pub fn new(
         url: impl Into<String>,
@@ -71,15 +70,6 @@ impl Request {
         ctx.http
             .create_reaction(self.channel_id, self.message_id, &Self::REACT_DONE.into())
             .await
-    }
-
-    pub async fn clear_react(&self, ctx: &serenity::Context) -> Result<(), Error> {
-        for react_type in Self::REACTS_ALL {
-            ctx.http
-                .delete_reaction_me(self.channel_id, self.message_id, &react_type.into())
-                .await?;
-        }
-        Ok(())
     }
 }
 

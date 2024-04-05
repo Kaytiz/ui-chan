@@ -13,6 +13,9 @@ pub async fn event_handler(
         serenity::FullEvent::CacheReady { guilds } => {
             println!("Cache ready! {:?}", guilds);
         }
+        serenity::FullEvent::Ratelimit { data } => {
+            println!("ratelilmit! {:?}", data);
+        }
         serenity::FullEvent::Message { new_message } => {
             if new_message.author.id != ctx.cache.current_user().id {
                 if let Some(guild_id) = new_message.guild_id {
@@ -52,9 +55,6 @@ pub async fn event_handler(
             } {
                 guild_data.song_queue.remove(index);
             }
-        }
-        serenity::FullEvent::Ratelimit { data } => {
-            println!("ratelilmit! {:?}", data);
         }
         _ => {}
     }
