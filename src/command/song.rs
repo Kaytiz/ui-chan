@@ -47,8 +47,8 @@ impl songbird::EventHandler for DisconnectHandler {
         self.context.shard.set_activity(None);
         let guild_data = data::Storage::guild(&self.context, self.guild_id).await;
         let mut guild_data = guild_data.lock().await;
-        guild_data.song_now_complete(&self.context).await.ok();
-        guild_data.song_queue_clear(&self.context).await.ok();
+        guild_data.song_now_complete(&self.context);
+        guild_data.song_queue_clear(&self.context);
         None
     }
 }
@@ -153,7 +153,7 @@ pub async fn play_internal(
             call.play_only_input(src.clone().into())
         };
 
-        guild_data.song_now_complete(ctx).await?;
+        guild_data.song_now_complete(ctx);
         guild_data.song_now = Some(data::song::Now::new(handle.clone(), request.clone()));
         guild_data.save().await?;
 
@@ -174,7 +174,10 @@ pub async fn play_internal(
         },
     )?;
 
-    request.react_playing(ctx).await.ok();
+    let ctx_clone = ctx.clone();
+    tokio::spawn(async move {
+        request.react_playing(&ctx_clone).await.ok();
+    });
 
     Ok(handle)
 }
@@ -193,7 +196,8 @@ pub async fn queue_internal(
         guild_data.song_queue.len() == 1 && guild_data.song_now.is_none()
     };
 
-    request.react_queue(ctx).await.ok();
+    let ctx_clone = ctx.clone();
+    tokio::spawn(async move { request.react_queue(&ctx_clone).await.ok() });
 
     if first_queue {
         next_internal(ctx, guild_id).await?;
@@ -217,8 +221,8 @@ pub async fn stop_internal(
     call.stop();
 
     ctx.set_activity(None);
-    guild_data.song_now_complete(ctx).await?;
-    guild_data.song_queue_clear(ctx).await?;
+    guild_data.song_now_complete(ctx);
+    guild_data.song_queue_clear(ctx);
 
     Ok(())
 }
@@ -229,7 +233,7 @@ pub async fn next_internal(
 ) -> Result<(), Error> {
     let guild_data = data::Storage::guild(ctx, guild_id).await;
 
-    let next = guild_data.lock().await.song_queue.pop_front();
+    let next = guild_data.lock().await.song_queue.pop_front(); // guild_data.lock().await.song_queue_take(ctx).await?;
 
     match next {
         Some(next) => {
@@ -246,7 +250,7 @@ pub async fn next_internal(
 #[poise::command(
     slash_command,
     guild_only,
-    subcommands("join", "leave", "stop", "next"),
+    subcommands("join", "leave", "stop", "next", "queue"),
     subcommand_required
 )]
 pub async fn song(_: Context<'_>) -> Result<(), Error> {
@@ -287,5 +291,19 @@ pub async fn stop(ctx: Context<'_>) -> Result<(), Error> {
 pub async fn next(ctx: Context<'_>) -> Result<(), Error> {
     ctx.reply("song next").await?;
     next_internal(ctx.serenity_context(), ctx.guild_id().unwrap()).await?;
+    Ok(())
+}
+
+#[poise::command(slash_command)]
+pub async fn queue(ctx: Context<'_>) -> Result<(), Error> {
+    let guild_data = data::Storage::guild(ctx.serenity_context(), ctx.guild_id().unwrap()).await;
+    let guild_data = guild_data.lock().await;
+    let response = guild_data
+        .song_queue
+        .iter()
+        .map(|request| request.url.clone())
+        .collect::<Vec<String>>()
+        .join("\n");
+    ctx.reply(&response).await?;
     Ok(())
 }

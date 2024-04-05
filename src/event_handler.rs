@@ -53,6 +53,9 @@ pub async fn event_handler(
                 guild_data.song_queue.remove(index);
             }
         }
+        serenity::FullEvent::Ratelimit { data } => {
+            println!("ratelilmit! {:?}", data);
+        }
         _ => {}
     }
     Ok(())

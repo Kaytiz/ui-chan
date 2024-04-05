@@ -139,14 +139,36 @@ impl Guild {
         self.users.entry(user_id).or_default()
     }
 
-    pub async fn song_now_complete(&mut self, ctx: &serenity::Context) -> Result<(), Error> {
+    pub fn song_now_complete(&mut self, ctx: &serenity::Context) {
         if let Some(now) = self.song_now.take() {
-            now.request.react_done(ctx).await.ok();
+            let ctx = ctx.clone();
+            tokio::spawn(async move {
+                now.request.react_done(&ctx).await.ok();
+            });
         }
-        Ok(())
     }
 
-    pub async fn song_queue_clear(&mut self, ctx: &serenity::Context) -> Result<(), Error> {
+    // pub async fn song_queue_take(
+    //     &mut self,
+    //     ctx: &serenity::Context,
+    // ) -> Result<song::Request, Error> {
+    //     async fn num_queue_reply(ctx: &serenity::Context, request: song::Request) -> i32 {
+    //         ctx.cache
+    //             .message(request.channel_id, request.message_id)
+    //             .unwrap()
+    //             .await_reaction(shard_messenger)
+    //     }
+
+    //     let queue_fetch = self
+    //         .song_queue
+    //         .iter()
+    //         .map(|request| num_queue_reply(ctx, *request));
+
+    //     for queues in self.song_queue {}
+    //     guild_data.lock().await.song_queue.pop_front()
+    // }
+
+    pub fn song_queue_clear(&mut self, ctx: &serenity::Context) {
         let song_queue = {
             // clear queue
             let mut song_queue: VecDeque<data::song::Request> = VecDeque::new();
@@ -154,11 +176,15 @@ impl Guild {
             song_queue
         };
 
-        for request in song_queue {
-            request.remove_react_queue(ctx).await.ok();
-        }
-
-        Ok(())
+        let ctx = ctx.clone();
+        tokio::spawn(async move {
+            futures::future::join_all(
+                song_queue
+                    .iter()
+                    .map(|request| request.remove_react_queue(&ctx)),
+            )
+            .await;
+        });
     }
 }
 
