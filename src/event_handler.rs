@@ -56,7 +56,53 @@ pub async fn event_handler(
                 guild_data.song_queue.remove(index);
             }
         }
+        serenity::FullEvent::ReactionAdd { add_reaction } => {
+            apply_queue_reaction(ctx, add_reaction, 1).await?
+        }
+        serenity::FullEvent::ReactionRemove { removed_reaction } => {
+            apply_queue_reaction(ctx, removed_reaction, -1).await?
+        }
         _ => {}
     }
+    Ok(())
+}
+
+pub async fn apply_queue_reaction(
+    ctx: &serenity::Context,
+    reaction: &serenity::Reaction,
+    amount: i32,
+) -> Result<(), Error> {
+    match reaction.member.as_ref() {
+        Some(member) => {
+            if member.user.id == ctx.cache.current_user().id {
+                return Ok(());
+            }
+        }
+        None => return Ok(()),
+    }
+
+    let guild_id = match reaction.guild_id {
+        Some(guild_id) => guild_id,
+        None => return Ok(()),
+    };
+    let guild_data = data::Storage::guild(ctx, guild_id).await;
+    let mut guild_data = guild_data.lock().await;
+
+    let channel_song = match guild_data.channel_song.as_ref() {
+        Some(channel_song) => channel_song,
+        None => return Ok(()),
+    };
+
+    if reaction.channel_id != *channel_song {
+        return Ok(());
+    }
+
+    for request in &mut guild_data.song_queue {
+        if request.message_id == reaction.message_id {
+            request.priority += amount;
+            return Ok(());
+        }
+    }
+
     Ok(())
 }

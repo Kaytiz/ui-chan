@@ -7,12 +7,13 @@ pub struct Request {
     pub author_id: serenity::UserId,
     pub channel_id: serenity::ChannelId,
     pub message_id: serenity::MessageId,
+    pub priority: i32,
 }
 
 impl Request {
-    const REACT_QUEUE: char = '🔖';
-    const REACT_PLAYING: char = '🎵';
-    const REACT_DONE: char = '✅';
+    pub const REACT_QUEUE: char = '🔖';
+    pub const REACT_PLAYING: char = '🎵';
+    pub const REACT_DONE: char = '✅';
 
     pub fn new(
         url: impl Into<String>,
@@ -27,6 +28,7 @@ impl Request {
             author_id,
             channel_id,
             message_id,
+            priority: 0,
         }
     }
 
@@ -42,13 +44,21 @@ impl Request {
 
     pub async fn remove_react_queue(&self, ctx: &serenity::Context) -> Result<(), serenity::Error> {
         ctx.http
-            .delete_reaction_me(self.channel_id, self.message_id, &Self::REACT_QUEUE.into())
+            .delete_message_reaction_emoji(
+                self.channel_id,
+                self.message_id,
+                &Self::REACT_QUEUE.into(),
+            )
             .await
     }
 
     pub async fn react_playing(&self, ctx: &serenity::Context) -> Result<(), serenity::Error> {
         ctx.http
-            .delete_reaction_me(self.channel_id, self.message_id, &Self::REACT_QUEUE.into())
+            .delete_message_reaction_emoji(
+                self.channel_id,
+                self.message_id,
+                &Self::REACT_QUEUE.into(),
+            )
             .await?;
         ctx.http
             .create_reaction(
@@ -61,7 +71,7 @@ impl Request {
 
     pub async fn react_done(&self, ctx: &serenity::Context) -> Result<(), serenity::Error> {
         ctx.http
-            .delete_reaction_me(
+            .delete_message_reaction_emoji(
                 self.channel_id,
                 self.message_id,
                 &Self::REACT_PLAYING.into(),

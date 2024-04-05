@@ -233,7 +233,7 @@ pub async fn next_internal(
 ) -> Result<(), Error> {
     let guild_data = data::Storage::guild(ctx, guild_id).await;
 
-    let next = guild_data.lock().await.song_queue.pop_front(); // guild_data.lock().await.song_queue_take(ctx).await?;
+    let next = guild_data.lock().await.song_queue_take(ctx).await;
 
     match next {
         Some(next) => {
@@ -301,7 +301,7 @@ pub async fn queue(ctx: Context<'_>) -> Result<(), Error> {
     let response = guild_data
         .song_queue
         .iter()
-        .map(|request| request.url.clone())
+        .map(|request| format!("{} : {}", request.priority, request.url.clone()))
         .collect::<Vec<String>>()
         .join("\n");
     ctx.reply(&response).await?;

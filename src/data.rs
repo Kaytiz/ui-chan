@@ -148,25 +148,48 @@ impl Guild {
         }
     }
 
-    // pub async fn song_queue_take(
-    //     &mut self,
-    //     ctx: &serenity::Context,
-    // ) -> Result<song::Request, Error> {
-    //     async fn num_queue_reply(ctx: &serenity::Context, request: song::Request) -> i32 {
-    //         ctx.cache
-    //             .message(request.channel_id, request.message_id)
-    //             .unwrap()
-    //             .await_reaction(shard_messenger)
-    //     }
+    pub async fn song_queue_take(&mut self, ctx: &serenity::Context) -> Option<song::Request> {
+        async fn num_queue_reply(ctx: &serenity::Context, request: song::Request) -> usize {
+            match ctx
+                .http
+                .get_reaction_users(
+                    request.channel_id,
+                    request.message_id,
+                    &song::Request::REACT_QUEUE.into(),
+                    8,
+                    None,
+                )
+                .await
+            {
+                Ok(users) => users
+                    .iter()
+                    .filter(|user| user.bot == false)
+                    .collect::<Vec<_>>()
+                    .len(),
+                _ => 0,
+            }
+        }
 
-    //     let queue_fetch = self
-    //         .song_queue
-    //         .iter()
-    //         .map(|request| num_queue_reply(ctx, *request));
+        // (index, priority)
+        let mut max: Option<(usize, usize)> = None;
+        for queue in self
+            .song_queue
+            .iter()
+            .enumerate()
+            .map(|(index, request)| (index, num_queue_reply(ctx, request.clone())))
+        {
+            let (index, priority) = (queue.0, queue.1.await);
+            let replace = match max {
+                Some((_, max_priority)) => priority > max_priority,
+                None => true,
+            };
+            if replace {
+                max = Some((index, priority));
+            }
+        }
 
-    //     for queues in self.song_queue {}
-    //     guild_data.lock().await.song_queue.pop_front()
-    // }
+        max.and_then(|max| self.song_queue.remove(max.0))
+    }
 
     pub fn song_queue_clear(&mut self, ctx: &serenity::Context) {
         let song_queue = {
