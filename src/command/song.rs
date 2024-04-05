@@ -250,7 +250,7 @@ pub async fn next_internal(
 #[poise::command(
     slash_command,
     guild_only,
-    subcommands("join", "leave", "stop", "next", "queue"),
+    subcommands("join", "leave", "stop", "next"),
     subcommand_required
 )]
 pub async fn song(_: Context<'_>) -> Result<(), Error> {
@@ -291,19 +291,5 @@ pub async fn stop(ctx: Context<'_>) -> Result<(), Error> {
 pub async fn next(ctx: Context<'_>) -> Result<(), Error> {
     ctx.reply("song next").await?;
     next_internal(ctx.serenity_context(), ctx.guild_id().unwrap()).await?;
-    Ok(())
-}
-
-#[poise::command(slash_command)]
-pub async fn queue(ctx: Context<'_>) -> Result<(), Error> {
-    let guild_data = data::Storage::guild(ctx.serenity_context(), ctx.guild_id().unwrap()).await;
-    let guild_data = guild_data.lock().await;
-    let response = guild_data
-        .song_queue
-        .iter()
-        .map(|request| format!("{} : {}", request.priority, request.url.clone()))
-        .collect::<Vec<String>>()
-        .join("\n");
-    ctx.reply(&response).await?;
     Ok(())
 }

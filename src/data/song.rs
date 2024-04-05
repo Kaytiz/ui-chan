@@ -7,7 +7,6 @@ pub struct Request {
     pub author_id: serenity::UserId,
     pub channel_id: serenity::ChannelId,
     pub message_id: serenity::MessageId,
-    pub priority: i32,
 }
 
 impl Request {
@@ -28,7 +27,6 @@ impl Request {
             author_id,
             channel_id,
             message_id,
-            priority: 0,
         }
     }
 
