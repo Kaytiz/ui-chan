@@ -20,15 +20,15 @@ pub async fn user(_: Context<'_>) -> Result<(), Error> {
 #[poise::command(slash_command)]
 pub async fn info(ctx: Context<'_>, target: Option<serenity::UserId>) -> Result<(), Error> {
     let guild_id = ctx.guild_id().unwrap();
+    let guild_data = data::Storage::guild(ctx.serenity_context(), guild_id).await;
     let user_id = target.unwrap_or(ctx.author().id);
 
-    let user = {
-        let storage = data::Storage::get(ctx.serenity_context()).await;
-        let storage = storage.lock().await;
-        storage.user(guild_id, user_id).cloned()
+    let user_data = {
+        let guild_data = guild_data.lock().await;
+        guild_data.user(user_id).cloned()
     };
 
-    match user {
+    match user_data {
         Some(user) => ctx.reply(format!("{}", user)).await?,
         None => ctx.reply("no user data").await?,
     };
@@ -50,12 +50,15 @@ struct UserModal {
 #[poise::command(slash_command)]
 pub async fn edit(ctx: ApplicationContext<'_>) -> Result<(), Error> {
     let guild_id = ctx.guild_id().unwrap();
+    let guild_data = data::Storage::guild(ctx.serenity_context(), guild_id).await;
     let user_id = ctx.author().id;
 
     let defaults = {
-        let storage = data::Storage::get(ctx.serenity_context()).await;
-        let storage = storage.lock().await;
-        match storage.user(guild_id, user_id) {
+        let user_data = {
+            let guild_data = guild_data.lock().await;
+            guild_data.user(user_id).cloned()
+        };
+        match user_data {
             Some(user) => {
                 let birthday = user.birthday.map(|date| date.to_string());
                 let phone_number = user.phone_number.to_owned();
@@ -72,19 +75,14 @@ pub async fn edit(ctx: ApplicationContext<'_>) -> Result<(), Error> {
 
     if let Some(data) = data {
         {
-            let storage = data::Storage::get(ctx.serenity_context()).await;
-            let mut storage = storage.lock().await;
-            let user = storage.user_mut(guild_id, user_id);
-            user.birthday = data
+            let mut guild_data = guild_data.lock().await;
+            let user_data = guild_data.user_mut(user_id);
+            user_data.birthday = data
                 .birthday
                 .and_then(|date_str| NaiveDate::from_str(&date_str).ok());
-            user.phone_number = data.phone_number;
+            user_data.phone_number = data.phone_number;
+            guild_data.save().await?;
         }
-        data::Storage::get(ctx.serenity_context())
-            .await
-            .lock()
-            .await
-            .save_default()?;
         ctx.reply("updated!").await?;
     }
 

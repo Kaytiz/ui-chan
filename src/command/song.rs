@@ -1,6 +1,6 @@
 use poise::serenity_prelude::async_trait;
 use songbird::input::Compose;
-use std::{collections::VecDeque, sync::Arc};
+use std::sync::Arc;
 
 use crate::{data, prelude::*};
 
@@ -45,8 +45,10 @@ struct DisconnectHandler {
 impl songbird::EventHandler for DisconnectHandler {
     async fn act(&self, _: &songbird::EventContext<'_>) -> Option<songbird::Event> {
         self.context.shard.set_activity(None);
-        now_complete(&self.context, self.guild_id).await.ok();
-        queue_clear(&self.context, self.guild_id).await.ok();
+        let guild_data = data::Storage::guild(&self.context, self.guild_id).await;
+        let mut guild_data = guild_data.lock().await;
+        guild_data.song_now_complete(&self.context).await.ok();
+        guild_data.song_queue_clear(&self.context).await.ok();
         None
     }
 }
@@ -129,63 +131,33 @@ pub async fn join_or_get(
         .ok_or(SongError::VoiceConnection.into())
 }
 
-pub async fn now_take(
-    ctx: &serenity::Context,
-    guild_id: serenity::GuildId,
-) -> Option<data::song::Now> {
-    let storage = data::Storage::get(ctx).await;
-    let mut storage = storage.lock().await;
-    let guild = storage.guild_mut(guild_id);
-    guild.song_now.take()
-}
-
-pub async fn now_complete(
-    ctx: &serenity::Context,
-    guild_id: serenity::GuildId,
-) -> Result<(), Error> {
-    if let Some(now) = now_take(ctx, guild_id).await {
-        now.request.react_done(ctx).await?;
-    }
-    Ok(())
-}
-
-pub async fn queue_clear(
-    ctx: &serenity::Context,
-    guild_id: serenity::GuildId,
-) -> Result<(), Error> {
-    let song_queue = {
-        // clear queue
-        let storage = data::Storage::get(ctx).await;
-        let mut storage = storage.lock().await;
-        let guild = storage.guild_mut(guild_id);
-        let mut song_queue: VecDeque<data::song::Request> = VecDeque::new();
-        std::mem::swap(&mut song_queue, &mut guild.song_queue);
-        song_queue
-    };
-
-    for request in song_queue {
-        request.remove_react_queue(ctx).await?;
-    }
-
-    Ok(())
-}
-
 pub async fn play_internal(
     ctx: &serenity::Context,
     request: data::song::Request,
 ) -> Result<songbird::tracks::TrackHandle, Error> {
     let shared = data::Shared::get(ctx).await;
+    let guild_data = data::Storage::guild(ctx, request.guild_id).await;
 
-    let mut src = if request.url.starts_with("http") {
-        songbird::input::YoutubeDl::new(shared.http_client.clone(), request.url.clone())
-    } else {
-        songbird::input::YoutubeDl::new_search(shared.http_client.clone(), request.url.clone())
-    };
+    let (mut src, handle) = {
+        let mut guild_data = guild_data.lock().await;
 
-    let handle = {
-        let call = join_or_get(ctx, request.guild_id, Some(request.author_id)).await?;
-        let mut call = call.lock().await;
-        call.play_only_input(src.clone().into())
+        let src = if request.url.starts_with("http") {
+            songbird::input::YoutubeDl::new(shared.http_client.clone(), request.url.clone())
+        } else {
+            songbird::input::YoutubeDl::new_search(shared.http_client.clone(), request.url.clone())
+        };
+
+        let handle = {
+            let call = join_or_get(ctx, request.guild_id, Some(request.author_id)).await?;
+            let mut call = call.lock().await;
+            call.play_only_input(src.clone().into())
+        };
+
+        guild_data.song_now_complete(ctx).await?;
+        guild_data.song_now = Some(data::song::Now::new(handle.clone(), request.clone()));
+        guild_data.save().await?;
+
+        (src, handle)
     };
 
     let metadata = src.aux_metadata().await?;
@@ -202,18 +174,7 @@ pub async fn play_internal(
         },
     )?;
 
-    // update song playing message
-    now_complete(ctx, request.guild_id).await?;
-
     request.react_playing(ctx).await?;
-
-    {
-        let storage = data::Storage::get(ctx).await;
-        let mut storage = storage.lock().await;
-        let guild = storage.guild_mut(request.guild_id);
-        guild.song_now = Some(data::song::Now::new(handle.clone(), request));
-        storage.save_default().ok();
-    }
 
     Ok(handle)
 }
@@ -224,25 +185,15 @@ pub async fn queue_internal(
 ) -> Result<SongCommandResult, Error> {
     let request = data::song::Request::from(message);
     let guild_id = request.guild_id;
-
-    let song_lock = {
-        let storage = data::Storage::get(ctx).await;
-        let mut storage = storage.lock().await;
-        let guild = storage.guild_mut(request.guild_id);
-        guild.song_lock.clone()
-    };
-
-    let _song_lock = song_lock.lock().await;
-
-    request.react_queue(ctx).await?;
+    let guild_data = data::Storage::guild(ctx, guild_id).await;
 
     let first_queue = {
-        let storage = data::Storage::get(ctx).await;
-        let mut storage = storage.lock().await;
-        let guild = storage.guild_mut(request.guild_id);
-        guild.song_queue.push_back(request);
-        guild.song_queue.len() == 1 && guild.song_now.is_none()
+        let mut guild_data = guild_data.lock().await;
+        guild_data.song_queue.push_back(request.clone());
+        guild_data.song_queue.len() == 1 && guild_data.song_now.is_none()
     };
+
+    request.react_queue(ctx).await?;
 
     if first_queue {
         next_internal(ctx, guild_id).await?;
@@ -256,14 +207,18 @@ pub async fn stop_internal(
     ctx: &serenity::Context,
     guild_id: serenity::GuildId,
 ) -> Result<(), Error> {
+    let guild_data = data::Storage::guild(ctx, guild_id).await;
+    let mut guild_data = guild_data.lock().await;
+
     let call = get_internal(ctx, guild_id)
         .await
         .ok_or(Box::new(SongError::VoiceConnection))?;
     let mut call = call.lock().await;
     call.stop();
 
-    now_complete(ctx, guild_id).await?;
-    queue_clear(ctx, guild_id).await?;
+    ctx.set_activity(None);
+    guild_data.song_now_complete(ctx).await?;
+    guild_data.song_queue_clear(ctx).await?;
 
     Ok(())
 }
@@ -272,12 +227,9 @@ pub async fn next_internal(
     ctx: &serenity::Context,
     guild_id: serenity::GuildId,
 ) -> Result<(), Error> {
-    let next = {
-        let storage = data::Storage::get(ctx).await;
-        let mut storage = storage.lock().await;
-        let guild = storage.guild_mut(guild_id);
-        guild.song_queue.pop_front()
-    };
+    let guild_data = data::Storage::guild(ctx, guild_id).await;
+
+    let next = guild_data.lock().await.song_queue.pop_front();
 
     match next {
         Some(next) => {

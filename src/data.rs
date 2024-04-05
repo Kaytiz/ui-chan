@@ -5,6 +5,7 @@ use std::{
     mem,
     sync::Arc,
 };
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub mod song;
 
@@ -29,93 +30,47 @@ impl Shared {
 pub struct StorageKey;
 
 impl serenity::prelude::TypeMapKey for StorageKey {
-    type Value = Arc<tokio::sync::Mutex<Storage>>;
+    type Value = Arc<serenity::prelude::Mutex<Storage>>;
 }
 
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Default)]
 pub struct Storage {
-    guilds: HashMap<serenity::GuildId, Guild>,
+    guilds: HashMap<serenity::GuildId, Arc<serenity::prelude::Mutex<Guild>>>,
 }
 
 impl Storage {
-    pub async fn get(ctx: &serenity::Context) -> Arc<tokio::sync::Mutex<Self>> {
+    pub async fn get(ctx: &serenity::Context) -> Arc<serenity::prelude::Mutex<Self>> {
         ctx.data.read().await.get::<StorageKey>().unwrap().clone()
     }
 
-    pub fn load(filename: &str) -> Result<Self, Error> {
-        if std::path::Path::new(filename).exists() {
-            let file = std::fs::File::open(filename)?;
-            let reader = std::io::BufReader::new(file);
-            let data = serde_json::from_reader(reader)?;
-            Ok(data)
-        } else {
-            Ok(Default::default())
+    pub async fn guild(
+        ctx: &serenity::Context,
+        guild_id: serenity::GuildId,
+    ) -> Arc<serenity::prelude::Mutex<Guild>> {
+        let storage = Self::get(ctx).await;
+        let mut storage = storage.lock().await;
+
+        match storage.guilds.entry(guild_id) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.get().clone(),
+            std::collections::hash_map::Entry::Vacant(entry) => match Guild::load(guild_id).await {
+                Ok(guild) => entry
+                    .insert(Arc::new(serenity::prelude::Mutex::new(guild)))
+                    .clone(),
+                _ => Arc::new(serenity::prelude::Mutex::new(Guild::new(guild_id))),
+            },
         }
-    }
-
-    pub fn save(&self, filename: &str) -> Result<(), Error> {
-        let file = std::fs::File::create(filename)?;
-        let writer = std::io::BufWriter::new(file);
-        let mut ser = serde_json::Serializer::pretty(writer);
-        self.serialize(&mut ser)?;
-        Ok(())
-    }
-
-    pub fn load_default() -> Result<Self, Error> {
-        Storage::load(DEFAULT_DATA_FILENAME)
-    }
-
-    pub fn save_default(&self) -> Result<(), Error> {
-        self.save(DEFAULT_DATA_FILENAME)
-    }
-
-    pub fn guild(&self, guild_id: serenity::GuildId) -> Option<&Guild> {
-        self.guilds.get(&guild_id)
-    }
-
-    pub fn guild_mut(&mut self, guild_id: serenity::GuildId) -> &mut Guild {
-        self.guilds.entry(guild_id).or_default()
-    }
-
-    pub fn channel(
-        &self,
-        guild_id: serenity::GuildId,
-        channel_id: serenity::ChannelId,
-    ) -> Option<&Channel> {
-        self.guild(guild_id)
-            .and_then(|guild| guild.channel(channel_id))
-    }
-
-    pub fn channel_mut(
-        &mut self,
-        guild_id: serenity::GuildId,
-        channel_id: serenity::ChannelId,
-    ) -> &mut Channel {
-        self.guild_mut(guild_id).channel_mut(channel_id)
-    }
-
-    pub fn user(&self, guild_id: serenity::GuildId, user_id: serenity::UserId) -> Option<&User> {
-        self.guild(guild_id).and_then(|guild| guild.user(user_id))
-    }
-
-    pub fn user_mut(
-        &mut self,
-        guild_id: serenity::GuildId,
-        user_id: serenity::UserId,
-    ) -> &mut User {
-        self.guild_mut(guild_id).user_mut(user_id)
     }
 }
 
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Serialize, Deserialize)]
 pub struct Guild {
+    #[serde(skip)]
+    pub id: serenity::GuildId,
+
     pub channels: HashMap<serenity::ChannelId, Channel>,
     pub channel_notify: Option<serenity::ChannelId>,
     pub channel_song: Option<serenity::ChannelId>,
     pub users: HashMap<serenity::UserId, User>,
-
-    #[serde(skip)]
-    pub song_lock: Arc<tokio::sync::Mutex<()>>,
 
     #[serde(skip)]
     pub song_now: Option<song::Now>,
@@ -125,6 +80,40 @@ pub struct Guild {
 }
 
 impl Guild {
+    pub fn new(id: serenity::GuildId) -> Self {
+        Self {
+            id,
+            channels: HashMap::new(),
+            channel_notify: None,
+            channel_song: None,
+            users: HashMap::new(),
+            song_now: None,
+            song_queue: VecDeque::new(),
+        }
+    }
+
+    fn make_file_path(guild_id: serenity::GuildId) -> String {
+        format!("./data/{}", guild_id.to_string())
+    }
+
+    pub async fn load(guild_id: serenity::GuildId) -> Result<Self, Error> {
+        let file_path = Self::make_file_path(guild_id);
+        let mut file = tokio::fs::File::open(&file_path).await?;
+        let mut str = String::new();
+        file.read_to_string(&mut str).await?;
+        let mut data: Self = serde_json::from_str(&str)?;
+        data.id = guild_id;
+        Ok(data)
+    }
+
+    pub async fn save(&self) -> Result<(), Error> {
+        let file_path = Self::make_file_path(self.id);
+        let mut file = tokio::fs::File::create(file_path).await?;
+        let file_str = serde_json::to_string_pretty(&self)?;
+        file.write_all(file_str.as_bytes()).await?;
+        Ok(())
+    }
+
     pub fn channel(&self, channel_id: serenity::ChannelId) -> Option<&Channel> {
         self.channels.get(&channel_id)
     }
@@ -139,6 +128,28 @@ impl Guild {
 
     pub fn user_mut(&mut self, user_id: serenity::UserId) -> &mut User {
         self.users.entry(user_id).or_default()
+    }
+
+    pub async fn song_now_complete(&mut self, ctx: &serenity::Context) -> Result<(), Error> {
+        if let Some(now) = self.song_now.take() {
+            now.request.react_done(ctx).await.ok();
+        }
+        Ok(())
+    }
+
+    pub async fn song_queue_clear(&mut self, ctx: &serenity::Context) -> Result<(), Error> {
+        let song_queue = {
+            // clear queue
+            let mut song_queue: VecDeque<data::song::Request> = VecDeque::new();
+            std::mem::swap(&mut song_queue, &mut self.song_queue);
+            song_queue
+        };
+
+        for request in song_queue {
+            request.remove_react_queue(ctx).await?;
+        }
+
+        Ok(())
     }
 }
 
@@ -174,25 +185,21 @@ pub mod channel {
 
     #[derive(Serialize, Deserialize)]
     pub enum Property {
-        Song,
         Attribute(String),
     }
 
     impl std::fmt::Display for Property {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             match self {
-                Self::Song => write!(f, "Song"),
                 Self::Attribute(attr) => write!(f, "Attribute({attr})"),
             }
         }
     }
 
-    pub fn is_song(property: &Property) -> bool {
-        matches!(property, Property::Song)
-    }
-
-    pub fn is_attribute(property: &Property) -> bool {
-        matches!(property, Property::Attribute(_))
+    impl Property {
+        pub fn is_attribute(property: &Property) -> bool {
+            matches!(property, Property::Attribute(_))
+        }
     }
 }
 

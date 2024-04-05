@@ -13,8 +13,11 @@ Cargo.lock
 # MSVC Windows builds of rustc generate these, which store debugging information
 *.pdb
 
+# mac os files
+**/.DS_Store
+
 # dotenv file
 .env
 
 # amumu bot files
-.data
+data/*

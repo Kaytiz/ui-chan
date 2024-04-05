@@ -59,9 +59,9 @@ async fn main() {
         data.insert::<data::SharedKey>(Arc::new(data::Shared {
             http_client: reqwest::Client::new(),
         }));
-        data.insert::<data::StorageKey>(Arc::new(tokio::sync::Mutex::new(
-            data::Storage::load_default().unwrap_or_default(),
-        )));
+        data.insert::<data::StorageKey>(Arc::new(
+            tokio::sync::Mutex::new(data::Storage::default()),
+        ));
     }
 
     let shard_manager = client.shard_manager.clone();

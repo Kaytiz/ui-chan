@@ -1,5 +1,6 @@
 use crate::prelude::*;
 
+#[derive(Clone)]
 pub struct Request {
     pub url: String,
     pub guild_id: serenity::GuildId,
