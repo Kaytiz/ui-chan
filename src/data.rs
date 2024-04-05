@@ -155,7 +155,7 @@ impl Guild {
         };
 
         for request in song_queue {
-            request.remove_react_queue(ctx).await?;
+            request.remove_react_queue(ctx).await.ok();
         }
 
         Ok(())

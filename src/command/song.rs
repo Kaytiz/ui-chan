@@ -174,7 +174,7 @@ pub async fn play_internal(
         },
     )?;
 
-    request.react_playing(ctx).await?;
+    request.react_playing(ctx).await.ok();
 
     Ok(handle)
 }
@@ -193,7 +193,7 @@ pub async fn queue_internal(
         guild_data.song_queue.len() == 1 && guild_data.song_now.is_none()
     };
 
-    request.react_queue(ctx).await?;
+    request.react_queue(ctx).await.ok();
 
     if first_queue {
         next_internal(ctx, guild_id).await?;
