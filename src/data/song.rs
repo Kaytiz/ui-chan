@@ -35,45 +35,48 @@ impl Request {
         ctx.http.get_message(self.channel_id, self.message_id).await
     }
 
-    pub async fn react_queue(&self, ctx: &serenity::Context) -> Result<(), Error> {
-        self.messge(ctx)
-            .await?
-            .react(ctx, Self::REACT_QUEUE)
-            .await?;
-        Ok(())
+    pub async fn react_queue(&self, ctx: &serenity::Context) -> Result<(), serenity::Error> {
+        ctx.http
+            .create_reaction(self.channel_id, self.message_id, &Self::REACT_QUEUE.into())
+            .await
     }
 
-    pub async fn remove_react_queue(&self, ctx: &serenity::Context) -> Result<(), Error> {
-        self.messge(ctx)
-            .await?
-            .delete_reaction(ctx, None, Self::REACT_QUEUE)
-            .await?;
-        Ok(())
+    pub async fn remove_react_queue(&self, ctx: &serenity::Context) -> Result<(), serenity::Error> {
+        ctx.http
+            .delete_reaction_me(self.channel_id, self.message_id, &Self::REACT_QUEUE.into())
+            .await
     }
 
-    pub async fn react_playing(&self, ctx: &serenity::Context) -> Result<(), Error> {
-        let message = self.messge(ctx).await?;
-        message
-            .delete_reaction(ctx, None, Self::REACT_QUEUE)
+    pub async fn react_playing(&self, ctx: &serenity::Context) -> Result<(), serenity::Error> {
+        ctx.http
+            .delete_reaction_me(self.channel_id, self.message_id, &Self::REACT_QUEUE.into())
             .await?;
-        message.react(ctx, Self::REACT_PLAYING).await?;
-        Ok(())
+        ctx.http
+            .create_reaction(
+                self.channel_id,
+                self.message_id,
+                &Self::REACT_PLAYING.into(),
+            )
+            .await
     }
 
-    pub async fn react_done(&self, ctx: &serenity::Context) -> Result<(), Error> {
-        let message = self.messge(ctx).await?;
-        message
-            .delete_reaction(ctx, None, Self::REACT_PLAYING)
+    pub async fn react_done(&self, ctx: &serenity::Context) -> Result<(), serenity::Error> {
+        ctx.http
+            .delete_reaction_me(
+                self.channel_id,
+                self.message_id,
+                &Self::REACT_PLAYING.into(),
+            )
             .await?;
-        message.react(ctx, Self::REACT_DONE).await?;
-        Ok(())
+        ctx.http
+            .create_reaction(self.channel_id, self.message_id, &Self::REACT_DONE.into())
+            .await
     }
 
     pub async fn clear_react(&self, ctx: &serenity::Context) -> Result<(), Error> {
         for react_type in Self::REACTS_ALL {
-            self.messge(ctx)
-                .await?
-                .delete_reaction(ctx, None, react_type)
+            ctx.http
+                .delete_reaction_me(self.channel_id, self.message_id, &react_type.into())
                 .await?;
         }
         Ok(())
@@ -84,7 +87,7 @@ impl From<&serenity::Message> for Request {
     fn from(value: &serenity::Message) -> Self {
         Self::new(
             value.content.clone(),
-            value.guild_id.expect("Except message in guild"),
+            value.guild_id.expect("Except message is in guild"),
             value.author.id,
             value.channel_id,
             value.id,
