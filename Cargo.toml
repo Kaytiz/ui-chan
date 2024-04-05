@@ -1,6 +1,6 @@
 [package]
 name = "amumu-bot"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2021"
 authors = ["Kimin Kim <kaytiz550@gmail.com>"]
 
