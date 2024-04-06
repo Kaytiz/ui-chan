@@ -149,7 +149,7 @@ impl Guild {
     }
 
     pub async fn song_queue_take(&mut self, ctx: &serenity::Context) -> Option<song::Request> {
-        async fn num_queue_reply(ctx: &serenity::Context, request: song::Request) -> usize {
+        async fn num_queue_reactions(ctx: &serenity::Context, request: song::Request) -> usize {
             match ctx
                 .http
                 .get_reaction_users(
@@ -175,8 +175,8 @@ impl Guild {
         for queue in self
             .song_queue
             .iter()
+            .map(|request| num_queue_reactions(ctx, request.clone()))
             .enumerate()
-            .map(|(index, request)| (index, num_queue_reply(ctx, request.clone())))
         {
             let (index, priority) = (queue.0, queue.1.await);
             let replace = match max {
