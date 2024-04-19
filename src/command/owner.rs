@@ -58,7 +58,7 @@ pub mod channel {
                             .map(|p| format!("{}", p))
                             .collect::<Vec<String>>(),
                     );
-                    if properties.len() > 0 {
+                    if !properties.is_empty() {
                         format!("channel properties : {:?}", properties)
                     } else {
                         String::from("no channel properties")

@@ -163,7 +163,7 @@ impl Guild {
             {
                 Ok(users) => users
                     .iter()
-                    .filter(|user| user.bot == false)
+                    .filter(|user| !user.bot)
                     .collect::<Vec<_>>()
                     .len(),
                 _ => 0,
