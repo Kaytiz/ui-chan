@@ -14,6 +14,11 @@ async fn main() {
     dotenv::dotenv().ok();
     tracing_subscriber::fmt::init();
 
+    let spotify = {
+        let creds = rspotify::Credentials::from_env().unwrap();
+        rspotify::ClientCredsSpotify::new(creds)
+    };
+
     let token = std::env::var("DISCORD_TOKEN").expect("Expected a token in the environment");
 
     let framework = poise::Framework::builder()
@@ -58,6 +63,7 @@ async fn main() {
         let mut data = client.data.write().await;
         data.insert::<data::SharedKey>(Arc::new(data::Shared {
             http_client: reqwest::Client::new(),
+            spotify
         }));
         data.insert::<data::StorageKey>(Arc::new(
             tokio::sync::Mutex::new(data::Storage::default()),

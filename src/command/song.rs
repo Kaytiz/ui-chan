@@ -1,4 +1,5 @@
 use poise::serenity_prelude::async_trait;
+use rspotify::clients::BaseClient;
 use songbird::input::Compose;
 use std::sync::Arc;
 
@@ -131,6 +132,40 @@ pub async fn join_or_get(
         .ok_or(SongError::VoiceConnection.into())
 }
 
+enum SongLinkType {
+    Youtube,
+    Spotify(String),
+    Search,
+}
+
+impl SongLinkType {
+    fn from_str(s: &str) -> Self {
+        let link_trim = s
+            .trim()
+            .trim_start_matches("http://")
+            .trim_start_matches("https://");
+
+        let mut link_split = link_trim.split('/');
+        
+        if let Some(domain) = link_split.next() {
+            if domain.contains("youtube") || domain.contains("youtu.be") {
+                return SongLinkType::Youtube;
+            }
+            if domain.contains("spotify") {
+                if let Some(track_url) = link_split.nth(1) {
+                    let mut track_id = track_url;
+                    if let Some(si_pos) = track_id.find("?si=") {
+                        track_id = &track_url[..(si_pos)];
+                    }
+                    return SongLinkType::Spotify(track_id.to_string());
+                };
+            }
+        }
+        
+        SongLinkType::Search
+    }
+}
+
 pub async fn play_internal(
     ctx: &serenity::Context,
     request: data::song::Request,
@@ -141,10 +176,35 @@ pub async fn play_internal(
     let (mut src, handle) = {
         let mut guild_data = guild_data.lock().await;
 
-        let src = if request.url.starts_with("http") {
-            songbird::input::YoutubeDl::new(shared.http_client.clone(), request.url.clone())
-        } else {
-            songbird::input::YoutubeDl::new_search(shared.http_client.clone(), request.url.clone())
+        let src = match SongLinkType::from_str(&request.url) {
+            SongLinkType::Youtube => songbird::input::YoutubeDl::new(shared.http_client.clone(), request.url.clone()),
+            SongLinkType::Spotify(track_id) => {
+                let track_id = rspotify::model::TrackId::from_id(&track_id)?;
+                let track = loop {
+                    match shared.spotify.track(track_id.clone(), None).await {
+                        Ok(track) => break track,
+                        Err(rspotify::ClientError::InvalidToken) => {
+                            shared.spotify.request_token().await?;
+                        }
+                        _ => {
+                            return Err(Error::from("Spotify Error"));
+                        }
+                    }
+                };
+                let search_str = {
+                    let mut search_str: String = String::with_capacity(64);
+                    search_str.push_str("music ");
+                    search_str.push_str(&track.artists.iter().map(|a| a.name.as_str()).collect::<Vec<&str>>().join(", "));
+                    search_str.push_str(" - ");
+                    search_str.push_str(&track.name);
+                    search_str
+                };
+
+                println!("spotify search_str = {}", &search_str);
+
+                songbird::input::YoutubeDl::new_search(shared.http_client.clone(), search_str)
+            }
+            SongLinkType::Search => songbird::input::YoutubeDl::new_search(shared.http_client.clone(), request.url.clone()),
         };
 
         let handle = {
@@ -155,7 +215,6 @@ pub async fn play_internal(
 
         guild_data.song_now_complete(ctx);
         guild_data.song_now = Some(data::song::Now::new(handle.clone(), request.clone()));
-        guild_data.save().await?;
 
         (src, handle)
     };
@@ -233,18 +292,29 @@ pub async fn next_internal(
 ) -> Result<(), Error> {
     let guild_data = data::Storage::guild(ctx, guild_id).await;
 
-    let next = guild_data.lock().await.song_queue_take(ctx).await;
+    loop
+    {
+        let next = guild_data.lock().await.song_queue_take(ctx).await;
 
-    match next {
-        Some(next) => {
-            play_internal(ctx, next).await?;
-        }
-        None => {
-            stop_internal(ctx, guild_id).await?;
+        match next {
+            Some(next) => {
+                match play_internal(ctx, next.clone()).await {
+                    Ok(_) => return Ok(()),
+                    Err(e) => {
+                        if let Ok(message) = ctx.http.get_message(next.channel_id, next.message_id).await {
+                            let error_message = format!("error : {:?}", e);
+                            message.reply(ctx, error_message).await?;
+                        }
+                        next.remove_react_queue(ctx).await?;
+                    },
+                }
+            }
+            None => {
+                stop_internal(ctx, guild_id).await?;
+                return Ok(());
+            }
         }
     }
-
-    Ok(())
 }
 
 #[poise::command(

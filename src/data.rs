@@ -19,6 +19,7 @@ impl serenity::prelude::TypeMapKey for SharedKey {
 
 pub struct Shared {
     pub http_client: reqwest::Client,
+    pub spotify: rspotify::ClientCredsSpotify,
 }
 
 impl Shared {

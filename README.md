@@ -1,6 +1,10 @@
 # amumu-bot
 
-### requirements
+## requirements
 
-- yt-dlp
-- DISCORD_TOKEN environment variable
+yt-dlp
+
+environment variables
+- DISCORD_TOKEN
+- RSPOTIFY_CLIENT_ID
+- RSPOTIFY_CLIENT_SECRET
