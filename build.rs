@@ -1,9 +1,9 @@
+use std::io;
+
+#[cfg(feature = "exe_icon")]
 use {
-    std::{
-        env,
-        io,
-    },
-    winresource::WindowsResource,
+    std::env,
+    winresource::WindowsResource
 };
 
 fn main() -> io::Result<()> {

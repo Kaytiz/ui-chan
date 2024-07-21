@@ -20,8 +20,10 @@ Cargo.lock
 .env
 
 # ui-chan local files
-data/*
+data/
 icon.ico
+temp/
 
 # external libraries
 RVC_CLI/
+RVC/

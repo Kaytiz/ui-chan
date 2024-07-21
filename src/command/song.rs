@@ -305,9 +305,27 @@ pub async fn next(ctx: Context<'_>) -> Result<(), Error> {
 
 #[cfg(feature = "rvc")]
 #[poise::command(slash_command)]
-pub async fn ai(ctx: Context<'_>, singer: rvc::Model, youtube_link: String) -> Result<(), Error> {
-    let source = data::song::Source::RVC(rvc::RVCSong::new(singer, youtube_link));
-    let request = data::song::Request::new(source, ctx.guild_id().expect("This command can only be used within guilds."), ctx.author().id, ctx.channel_id(), None);
+pub async fn ai(ctx: Context<'_>, singer: rvc::Model, song: String) -> Result<(), Error> {
+    let reply = ctx.reply(format!("Song AI {} - {}", singer.friendly_name(), song)).await?;
+
+    let youtube = data::song::Source::Chat(song).get_youtube(ctx.serenity_context()).await?;
+
+    let rvc_song = rvc::RVCSong::new(singer, youtube).await?;
+
+    reply.delete(ctx).await?;
+    
+    let name = format!("{}", rvc_song);
+    let message = ctx.channel_id().say(ctx, name).await?;
+    
+    let request = data::song::Request::new(
+        data::song::Source::RVC(rvc_song),
+        ctx.guild_id().expect("This command can only be used within guilds."), 
+        ctx.author().id,
+        ctx.channel_id(),
+        message.id
+    );
+
     queue_internal(ctx.serenity_context(), request).await?;
+    
     Ok(())
 }
