@@ -1,4 +1,4 @@
-# amumu-bot
+# ui-chan
 
 ## requirements
 
