@@ -182,9 +182,9 @@ pub async fn play_internal(
 
 pub async fn queue_internal(
     ctx: &serenity::Context,
-    message: &serenity::Message,
+    request: data::song::Request,
 ) -> Result<SongCommandResult, Error> {
-    let request = Arc::new(data::song::Request::from(message));
+    let request = Arc::new(request);
     let guild_id = request.guild_id;
     let guild_data = data::Storage::guild(ctx, guild_id).await;
 
@@ -244,7 +244,7 @@ pub async fn next_internal(
                             let error_message = format!("error : {:?}", e);
                             message.reply(ctx, error_message).await?;
                         }
-                        next.remove_react_queue(ctx).await?;
+                        next.remove_react_queue(ctx).await.ok();
                     },
                 }
             }
@@ -259,7 +259,7 @@ pub async fn next_internal(
 #[poise::command(
     slash_command,
     guild_only,
-    subcommands("join", "leave", "stop", "next"),
+    subcommands("join", "leave", "stop", "next", "ai"),
     subcommand_required
 )]
 pub async fn song(_: Context<'_>) -> Result<(), Error> {
@@ -306,5 +306,8 @@ pub async fn next(ctx: Context<'_>) -> Result<(), Error> {
 #[cfg(feature = "rvc")]
 #[poise::command(slash_command)]
 pub async fn ai(ctx: Context<'_>, singer: rvc::Model, youtube_link: String) -> Result<(), Error> {
+    let source = data::song::Source::RVC(rvc::RVCSong::new(singer, youtube_link));
+    let request = data::song::Request::new(source, ctx.guild_id().expect("This command can only be used within guilds."), ctx.author().id, ctx.channel_id(), None);
+    queue_internal(ctx.serenity_context(), request).await?;
     Ok(())
 }

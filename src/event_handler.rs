@@ -51,7 +51,7 @@ async fn handle_queue_new_song(ctx: &serenity::Context, message: &serenity::Mess
     };
 
     if is_song_channel {
-        if let Err(err) = command::song::queue_internal(ctx, message).await {
+        if let Err(err) = command::song::queue_internal(ctx, data::song::Request::from(message)).await {
             message.reply(ctx, &format!("error: {}", err)).await.ok()?;
         }
     }

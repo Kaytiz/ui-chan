@@ -6,7 +6,7 @@ authors = ["Kimin Kim <kaytiz550@gmail.com>"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [features]
-default = ["rvc", "exe_icon"]
+default = ["rvc"]
 rvc = []
 exe_icon = []
 

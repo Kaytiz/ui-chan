@@ -41,11 +41,6 @@ impl SongLinkType {
     }
 }
 
-
-// impl futures::Future for RVCSong {
-//     type Output = ;
-// }
-
 pub enum Source {
 
     Chat(String),
@@ -54,9 +49,9 @@ pub enum Source {
     RVC(rvc::RVCSong),
 }
 
-async fn youtubedl_get_title_async(mut youtubedl: songbird::input::YoutubeDl) -> Option<String> {
+async fn youtubedl_get_title_async(mut youtubedl: songbird::input::YoutubeDl, optional_artist: Option<String>) -> Option<String> {
     if let Ok(metadata) = youtubedl.aux_metadata().await {
-        if let Some(artist) = metadata.artist.as_ref() {
+        if let Some(artist) = optional_artist.as_ref().or(metadata.artist.as_ref()) {
             if let Some(track) = metadata.track.as_ref() {
                 return Some(format!("{} - {}", artist, track))
             }
@@ -70,13 +65,14 @@ async fn youtubedl_get_title_async(mut youtubedl: songbird::input::YoutubeDl) ->
 
 impl Source {
     pub async fn get_input(&self, ctx: &serenity::Context) -> Result<(songbird::input::Input, std::pin::Pin<Box<dyn futures::Future<Output = Option<String>> + Send>>), Error> {
+        let shared = data::Shared::get(ctx).await;
+
         match self {
             Self::Chat(str) => {
-                let shared = data::Shared::get(ctx).await;
                 match SongLinkType::from_str(str) {
                     SongLinkType::Youtube => {
                         let source = songbird::input::YoutubeDl::new(shared.http_client.clone(), str.clone());
-                        let title = youtubedl_get_title_async(source.clone());
+                        let title = youtubedl_get_title_async(source.clone(), None);
                         Ok((source.into(), Box::pin(title)))
                     },
                     SongLinkType::Spotify(track_id) => {
@@ -104,19 +100,24 @@ impl Source {
                         println!("spotify search_str = {}", &search_str);
 
                         let source = songbird::input::YoutubeDl::new_search(shared.http_client.clone(), search_str);
-                        let title = youtubedl_get_title_async(source.clone());
+                        let title = youtubedl_get_title_async(source.clone(), None);
                         Ok((source.into(), Box::pin(title)))
                     },
                     SongLinkType::Search => {
                         let source = songbird::input::YoutubeDl::new_search(shared.http_client.clone(), str.clone());
-                        let title = youtubedl_get_title_async(source.clone());
+                        let title = youtubedl_get_title_async(source.clone(), None);
                         Ok((source.into(), Box::pin(title)))
                     },
                 }
             },
             #[cfg(feature = "rvc")]
             Self::RVC(rvc_song) => {
-                Err(Error::from("in Development")) //Ok(songbird::input::File::new("test.wav").into())
+                let file = rvc_song.await?;
+
+                let youtube_source = songbird::input::YoutubeDl::new(shared.http_client.clone(), rvc_song.url.clone());
+                let title = youtubedl_get_title_async(youtube_source, None);
+
+                Ok((songbird::input::File::new(file).into(), Box::pin(title)))
             }
         }
     }
@@ -128,7 +129,7 @@ pub struct Request {
     pub guild_id: serenity::GuildId,
     pub author_id: serenity::UserId,
     pub channel_id: serenity::ChannelId,
-    pub message_id: serenity::MessageId,
+    pub message_id: Option<serenity::MessageId>,
 }
 
 impl Request {
@@ -141,7 +142,7 @@ impl Request {
         guild_id: serenity::GuildId,
         author_id: serenity::UserId,
         channel_id: serenity::ChannelId,
-        message_id: serenity::MessageId,
+        message_id: Option<serenity::MessageId>,
     ) -> Self {
         Self {
             source,
@@ -152,54 +153,74 @@ impl Request {
         }
     }
 
-    pub async fn messge(&self, ctx: &serenity::Context) -> serenity::Result<serenity::Message> {
-        ctx.http.get_message(self.channel_id, self.message_id).await
+    pub async fn messge(&self, ctx: &serenity::Context) -> Option<serenity::Message> {
+        if let Some(message_id) = self.message_id.as_ref() {
+            ctx.http.get_message(self.channel_id, *message_id).await.ok()
+        } else {
+            None
+        }
     }
 
     pub async fn react_queue(&self, ctx: &serenity::Context) -> Result<(), serenity::Error> {
-        ctx.http
-            .create_reaction(self.channel_id, self.message_id, &Self::REACT_QUEUE.into())
-            .await
+        if let Some(message_id) = self.message_id.as_ref() {
+            ctx.http
+                .create_reaction(self.channel_id, *message_id, &Self::REACT_QUEUE.into())
+                .await
+        } else {
+            Ok(())
+        }
     }
 
     pub async fn remove_react_queue(&self, ctx: &serenity::Context) -> Result<(), serenity::Error> {
-        ctx.http
+        if let Some(message_id) = self.message_id.as_ref() {
+            ctx.http
             .delete_message_reaction_emoji(
                 self.channel_id,
-                self.message_id,
+                *message_id,
                 &Self::REACT_QUEUE.into(),
             )
             .await
+        } else {
+            Ok(())
+        }        
     }
 
     pub async fn react_playing(&self, ctx: &serenity::Context) -> Result<(), serenity::Error> {
-        ctx.http
+        if let Some(message_id) = self.message_id.as_ref() {
+            ctx.http
             .delete_message_reaction_emoji(
                 self.channel_id,
-                self.message_id,
+                *message_id,
                 &Self::REACT_QUEUE.into(),
             )
             .await?;
-        ctx.http
-            .create_reaction(
-                self.channel_id,
-                self.message_id,
-                &Self::REACT_PLAYING.into(),
-            )
-            .await
+            ctx.http
+                .create_reaction(
+                    self.channel_id,
+                    *message_id,
+                    &Self::REACT_PLAYING.into(),
+                )
+                .await
+        } else {
+            Ok(())
+        }
     }
 
     pub async fn react_done(&self, ctx: &serenity::Context) -> Result<(), serenity::Error> {
-        ctx.http
+        if let Some(message_id) = self.message_id.as_ref() {
+            ctx.http
             .delete_message_reaction_emoji(
                 self.channel_id,
-                self.message_id,
+                *message_id,
                 &Self::REACT_PLAYING.into(),
             )
             .await?;
-        ctx.http
-            .create_reaction(self.channel_id, self.message_id, &Self::REACT_DONE.into())
-            .await
+            ctx.http
+                .create_reaction(self.channel_id, *message_id, &Self::REACT_DONE.into())
+                .await
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -210,7 +231,7 @@ impl From<&serenity::Message> for Request {
             value.guild_id.expect("Except message is in guild"),
             value.author.id,
             value.channel_id,
-            value.id,
+            Some(value.id),
         )
     }
 }
