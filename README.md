@@ -3,6 +3,7 @@
 ## requirements
 
 yt-dlp
+ffmpeg
 
 environment variables
 - DISCORD_TOKEN
