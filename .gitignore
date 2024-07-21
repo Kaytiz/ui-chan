@@ -19,5 +19,9 @@ Cargo.lock
 # dotenv file
 .env
 
-# amumu bot files
+# ui-chan local files
 data/*
+icon.ico
+
+# external libraries
+RVC_CLI/

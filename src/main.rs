@@ -1,4 +1,8 @@
 pub mod data;
+
+#[cfg(feature = "rvc")]
+pub mod rvc;
+
 pub mod prelude;
 
 mod command;

@@ -1,0 +1,1 @@
+target\release\ui-chan.exe

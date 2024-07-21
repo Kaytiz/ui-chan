@@ -1,9 +1,10 @@
 use poise::serenity_prelude::async_trait;
-use rspotify::clients::BaseClient;
-use songbird::input::Compose;
 use std::sync::Arc;
 
 use crate::{data, prelude::*};
+
+#[cfg(feature = "rvc")]
+use crate::rvc;
 
 #[derive(Debug)]
 pub enum SongError {
@@ -132,97 +133,35 @@ pub async fn join_or_get(
         .ok_or(SongError::VoiceConnection.into())
 }
 
-enum SongLinkType {
-    Youtube,
-    Spotify(String),
-    Search,
-}
 
-impl SongLinkType {
-    fn from_str(s: &str) -> Self {
-        let link_trim = s
-            .trim()
-            .trim_start_matches("http://")
-            .trim_start_matches("https://");
-
-        let mut link_split = link_trim.split('/');
-        
-        if let Some(domain) = link_split.next() {
-            if domain.contains("youtube") || domain.contains("youtu.be") {
-                return SongLinkType::Youtube;
-            }
-            if domain.contains("spotify") {
-                if let Some(track_url) = link_split.nth(1) {
-                    let mut track_id = track_url;
-                    if let Some(si_pos) = track_id.find("?si=") {
-                        track_id = &track_url[..(si_pos)];
-                    }
-                    return SongLinkType::Spotify(track_id.to_string());
-                };
-            }
-        }
-        
-        SongLinkType::Search
-    }
-}
 
 pub async fn play_internal(
     ctx: &serenity::Context,
-    request: data::song::Request,
+    request: Arc<data::song::Request>,
 ) -> Result<songbird::tracks::TrackHandle, Error> {
-    let shared = data::Shared::get(ctx).await;
     let guild_data = data::Storage::guild(ctx, request.guild_id).await;
 
-    let (mut src, handle) = {
+    let (handle, title_future) = {
         let mut guild_data = guild_data.lock().await;
 
-        let src = match SongLinkType::from_str(&request.url) {
-            SongLinkType::Youtube => songbird::input::YoutubeDl::new(shared.http_client.clone(), request.url.clone()),
-            SongLinkType::Spotify(track_id) => {
-                let track_id = rspotify::model::TrackId::from_id(&track_id)?;
-                let track = loop {
-                    match shared.spotify.track(track_id.clone(), None).await {
-                        Ok(track) => break track,
-                        Err(rspotify::ClientError::InvalidToken) => {
-                            shared.spotify.request_token().await?;
-                        }
-                        _ => {
-                            return Err(Error::from("Spotify Error"));
-                        }
-                    }
-                };
-                let search_str = {
-                    let mut search_str: String = String::with_capacity(64);
-                    search_str.push_str("music ");
-                    search_str.push_str(&track.artists.iter().map(|a| a.name.as_str()).collect::<Vec<&str>>().join(", "));
-                    search_str.push_str(" - ");
-                    search_str.push_str(&track.name);
-                    search_str
-                };
-
-                println!("spotify search_str = {}", &search_str);
-
-                songbird::input::YoutubeDl::new_search(shared.http_client.clone(), search_str)
-            }
-            SongLinkType::Search => songbird::input::YoutubeDl::new_search(shared.http_client.clone(), request.url.clone()),
-        };
+        let (input, title_future) = request.source.get_input(ctx).await?;
 
         let handle = {
             let call = join_or_get(ctx, request.guild_id, Some(request.author_id)).await?;
             let mut call = call.lock().await;
-            call.play_only_input(src.clone().into())
+            call.play_only_input(input)
         };
 
         guild_data.song_now_complete(ctx);
         guild_data.song_now = Some(data::song::Now::new(handle.clone(), request.clone()));
 
-        (src, handle)
+        (handle, title_future)
     };
 
-    let metadata = src.aux_metadata().await?;
-
-    if let Some(title) = metadata.title.as_deref() {
+    if let Some(title) = title_future.await {
         ctx.set_activity(Some(serenity::ActivityData::listening(title)))
+    } else {
+        ctx.set_activity(Some(serenity::ActivityData::listening("")))
     }
 
     handle.add_event(
@@ -245,7 +184,7 @@ pub async fn queue_internal(
     ctx: &serenity::Context,
     message: &serenity::Message,
 ) -> Result<SongCommandResult, Error> {
-    let request = data::song::Request::from(message);
+    let request = Arc::new(data::song::Request::from(message));
     let guild_id = request.guild_id;
     let guild_data = data::Storage::guild(ctx, guild_id).await;
 
@@ -361,5 +300,11 @@ pub async fn stop(ctx: Context<'_>) -> Result<(), Error> {
 pub async fn next(ctx: Context<'_>) -> Result<(), Error> {
     ctx.reply("song next").await?;
     next_internal(ctx.serenity_context(), ctx.guild_id().unwrap()).await?;
+    Ok(())
+}
+
+#[cfg(feature = "rvc")]
+#[poise::command(slash_command)]
+pub async fn ai(ctx: Context<'_>, singer: rvc::Model, youtube_link: String) -> Result<(), Error> {
     Ok(())
 }

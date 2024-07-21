@@ -1,10 +1,15 @@
 [package]
-name = "amumu-bot"
+name = "ui-chan"
 version = "0.2.4"
 edition = "2021"
 authors = ["Kimin Kim <kaytiz550@gmail.com>"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[features]
+default = ["rvc", "exe_icon"]
+rvc = []
+exe_icon = []
+
 
 [dependencies]
 poise = "0.6"
@@ -24,3 +29,7 @@ chrono = "0.4"
 reqwest = "0.11"
 futures = "0.3.30"
 rspotify = { version = "0.13.2", features = ["env-file"] }
+
+
+[build-dependencies]
+winresource = "0.1.17"

@@ -77,7 +77,7 @@ pub struct Guild {
     pub song_now: Option<song::Now>,
 
     #[serde(skip)]
-    pub song_queue: VecDeque<song::Request>,
+    pub song_queue: VecDeque<Arc<song::Request>>,
 }
 
 impl Guild {
@@ -149,8 +149,8 @@ impl Guild {
         }
     }
 
-    pub async fn song_queue_take(&mut self, ctx: &serenity::Context) -> Option<song::Request> {
-        async fn num_queue_reactions(ctx: &serenity::Context, request: song::Request) -> usize {
+    pub async fn song_queue_take(&mut self, ctx: &serenity::Context) -> Option<Arc<song::Request>> {
+        async fn num_queue_reactions(ctx: &serenity::Context, request: &song::Request) -> usize {
             match ctx
                 .http
                 .get_reaction_users(
@@ -176,7 +176,7 @@ impl Guild {
         for queue in self
             .song_queue
             .iter()
-            .map(|request| num_queue_reactions(ctx, request.clone()))
+            .map(|request| num_queue_reactions(ctx, request))
             .enumerate()
         {
             let (index, priority) = (queue.0, queue.1.await);
@@ -195,7 +195,7 @@ impl Guild {
     pub fn song_queue_clear(&mut self, ctx: &serenity::Context) {
         let song_queue = {
             // clear queue
-            let mut song_queue: VecDeque<data::song::Request> = VecDeque::new();
+            let mut song_queue: VecDeque<Arc<data::song::Request>> = VecDeque::new();
             std::mem::swap(&mut song_queue, &mut self.song_queue);
             song_queue
         };
