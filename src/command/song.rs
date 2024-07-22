@@ -1,5 +1,5 @@
 use poise::serenity_prelude::async_trait;
-use std::{default, sync::Arc};
+use std::sync::Arc;
 
 use crate::{data, prelude::*};
 

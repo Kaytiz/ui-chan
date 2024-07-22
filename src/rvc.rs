@@ -44,8 +44,8 @@ pub struct RVCSong {
 
 #[derive(Default)]
 pub struct RVCSharedData {
-    output: Option<String>,
-    mp3: Option<String>,
+    output: Option<PathBuf>,
+    mp3: Option<PathBuf>,
 }
 
 impl RVCSong {
@@ -165,19 +165,6 @@ impl RVCSong {
                 
                 println!("rvc_out = {}", String::from_utf8_lossy(&rvc_out.stdout));
                 println!("rvc_err = {}", String::from_utf8_lossy(&rvc_out.stderr));
-                
-
-                // let rvc_resample_out = std::process::Command::new("ffmpeg")
-                //     .current_dir(&working_dir_thread)
-                //     .arg("-i")
-                //     .arg("rvc.wav")
-                //     .arg("-af")
-                //     .arg(format!("asetrate=40000,aresample=44100"))
-                //     .arg("rvc_resample.wav")
-                //     .output()?;
-
-                // println!("rvc_resample_out = {}", String::from_utf8_lossy(&rvc_resample_out.stdout));
-                // println!("rvc_resample_err = {}", String::from_utf8_lossy(&rvc_resample_out.stderr));
             }
 
 
@@ -228,7 +215,7 @@ impl RVCSong {
                     .arg("-i")
                     .arg("mix_harmony.wav")
                     .arg("-filter_complex")
-                    .arg("[0:a][1:a]amerge=inputs=2[a],pan=stereo|c0=c0+c2|c1=c1+c3[a]")
+                    .arg("[0:a][1:a]amerge=inputs=2,pan=stereo|c0=c0+c2|c1=c1+c3[a]")
                     .arg("-map")
                     .arg("[a]")
                     .arg("merge_inst.wav")
@@ -240,11 +227,11 @@ impl RVCSong {
                 let merge_vocal_out = std::process::Command::new("ffmpeg")
                     .current_dir(&working_dir_thread)
                     .arg("-i")
-                    .arg("rvc.wav")
-                    .arg("-i")
                     .arg("merge_inst.wav")
+                    .arg("-i")
+                    .arg("rvc.wav")
                     .arg("-filter_complex")
-                    .arg("[0:a][1:a]amerge=inputs=2,pan=stereo|c0=c0+c1|c1=c0+c2[a]")
+                    .arg("[0:a][1:a]amerge=inputs=2,pan=stereo|c0=c0+c2|c1=c1+c2[a]")
                     .arg("-map")
                     .arg("[a]")
                     .arg("mixdown.wav")
@@ -273,8 +260,8 @@ impl RVCSong {
             let mp3_path = working_dir_thread.join("mixdown.mp3");
 
             let mut shared = shared_thread.lock().unwrap();
-            shared.output = Some(mixdown_path.to_string_lossy().to_string());
-            shared.mp3 = Some(mp3_path.to_string_lossy().to_string());
+            shared.output = Some(mixdown_path);
+            shared.mp3 = Some(mp3_path);
 
             Ok(())
         });
@@ -299,13 +286,13 @@ impl RVCSong {
         Ok(())
     }
 
-    pub async fn file(&self) -> Result<String, Error> {
+    pub async fn file(&self) -> Result<PathBuf, Error> {
         self.wait().await?;
         let shared = self.shared.lock().unwrap();
         shared.output.clone().ok_or(Error::from("failed"))
     }
 
-    pub async fn mp3(&self) -> Result<String, Error> {
+    pub async fn mp3(&self) -> Result<PathBuf, Error> {
         self.wait().await?;
         let shared = self.shared.lock().unwrap();
         shared.mp3.clone().ok_or(Error::from("failed"))

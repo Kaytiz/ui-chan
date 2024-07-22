@@ -75,6 +75,10 @@ impl Source {
             Self::RVC(rvc_song) => {
                 let file = rvc_song.file().await?;
 
+                if !file.exists() {
+                    return Err(Error::from("RVC Failed"));
+                }
+
                 let youtube_source = rvc_song.youtube.clone();
                 let title = youtubedl_get_title_async(youtube_source, None);
 

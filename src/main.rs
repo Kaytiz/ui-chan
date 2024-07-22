@@ -18,6 +18,11 @@ async fn main() {
     dotenv::dotenv().ok();
     tracing_subscriber::fmt::init();
 
+    let temp_path = std::path::Path::new("temp");
+    if temp_path.exists() {
+        std::fs::remove_dir(temp_path).ok();
+    }
+
     let spotify = {
         let creds = rspotify::Credentials::from_env().unwrap();
         rspotify::ClientCredsSpotify::new(creds)
