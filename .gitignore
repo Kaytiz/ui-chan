@@ -27,3 +27,4 @@ temp/
 # external libraries
 RVC_CLI/
 RVC/
+audio-separator

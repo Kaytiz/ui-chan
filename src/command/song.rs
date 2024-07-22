@@ -1,5 +1,5 @@
 use poise::serenity_prelude::async_trait;
-use std::sync::Arc;
+use std::{default, sync::Arc};
 
 use crate::{data, prelude::*};
 
@@ -24,6 +24,38 @@ impl std::fmt::Display for SongError {
 }
 
 impl std::error::Error for SongError {}
+
+
+
+#[derive(Copy, Clone, Default, poise::ChoiceParameter)]
+pub enum SongRequestTarget
+{
+    Play,
+    Download,
+
+    #[default]
+    All,
+}
+
+impl SongRequestTarget {
+
+    pub fn should_play(&self) -> bool {
+        match self {
+            SongRequestTarget::Play => true,
+            SongRequestTarget::Download => false,
+            SongRequestTarget::All => true,
+        }
+    }
+
+    pub fn should_download(&self) -> bool {
+        match self {
+            SongRequestTarget::Play => false,
+            SongRequestTarget::Download => true,
+            SongRequestTarget::All => true,
+        }
+    }
+}
+
 
 struct TrackEndHandler {
     context: serenity::Context,
@@ -182,9 +214,8 @@ pub async fn play_internal(
 
 pub async fn queue_internal(
     ctx: &serenity::Context,
-    request: data::song::Request,
+    request: std::sync::Arc<data::song::Request>,
 ) -> Result<SongCommandResult, Error> {
-    let request = Arc::new(request);
     let guild_id = request.guild_id;
     let guild_data = data::Storage::guild(ctx, guild_id).await;
 
@@ -305,27 +336,51 @@ pub async fn next(ctx: Context<'_>) -> Result<(), Error> {
 
 #[cfg(feature = "rvc")]
 #[poise::command(slash_command)]
-pub async fn ai(ctx: Context<'_>, singer: rvc::Model, song: String) -> Result<(), Error> {
-    let reply = ctx.reply(format!("Song AI {} - {}", singer.friendly_name(), song)).await?;
+pub async fn ai(ctx: Context<'_>, singer: rvc::Model, song: String, pitch: Option<i32>, target: Option<SongRequestTarget>) -> Result<(), Error> {
+    use serenity::{CreateAttachment, CreateMessage};
+
+    let target = target.unwrap_or_default();
+
+    let mut draft_info = format!("request Song AI {} - {}", singer.friendly_name(), song);
+    if let Some(pitch) = pitch.as_ref() {
+        let prefix: &'static str = if *pitch > 0 {" +"} else {" "};
+        draft_info.push_str(&format!("{}{}", prefix, pitch.to_string()))
+    }
+
+    ctx.reply(draft_info).await?;
 
     let youtube = data::song::Source::Chat(song).get_youtube(ctx.serenity_context()).await?;
 
-    let rvc_song = rvc::RVCSong::new(singer, youtube).await?;
+    let rvc_song = rvc::RVCSong::new(singer, youtube, pitch).await?;
 
-    reply.delete(ctx).await?;
+    // reply.delete(ctx).await?;
     
-    let name = format!("{}", rvc_song);
-    let message = ctx.channel_id().say(ctx, name).await?;
+    let name = rvc_song.to_string();
+    let message = ctx.channel_id().say(ctx, &name).await?;
     
-    let request = data::song::Request::new(
+    let request = Arc::new(data::song::Request::new(
         data::song::Source::RVC(rvc_song),
         ctx.guild_id().expect("This command can only be used within guilds."), 
         ctx.author().id,
         ctx.channel_id(),
         message.id
-    );
+    ));
 
-    queue_internal(ctx.serenity_context(), request).await?;
+    if target.should_play()
+    {
+        queue_internal(ctx.serenity_context(), request.clone()).await?;
+    }
+    
+    if target.should_download()
+    {
+        if let data::song::Source::RVC(rvc_song) = &request.source {
+            let mp3 = rvc_song.mp3().await?;
+            let mp3 = tokio::fs::File::open(mp3).await?;
+            let message = CreateMessage::new()
+                .add_file(CreateAttachment::file(&mp3, format!("{}.mp3", name)).await?);
+            ctx.channel_id().send_message(ctx, message).await?;
+        }
+    }
     
     Ok(())
 }
