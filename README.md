@@ -12,3 +12,4 @@ environment variables
 
 ## for RVC
 RVC_CLI
+audio-separator
