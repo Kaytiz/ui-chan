@@ -171,7 +171,7 @@ impl RVCSong {
             // Inst pitchshift
             {
                 if let Some(pitch) = pitch.as_ref() {
-                    let normalized = (pitch + 6) % 12 - 6;
+                    let normalized = (pitch + 6).rem_euclid(12) - 6;
                     let freq_ratio = 2.0f64.powf(normalized as f64 / 12.0);
 
                     let inst_shift_out = std::process::Command::new("ffmpeg")
