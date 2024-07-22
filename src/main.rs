@@ -20,7 +20,7 @@ async fn main() {
 
     let temp_path = std::path::Path::new("temp");
     if temp_path.exists() {
-        std::fs::remove_dir(temp_path).ok();
+        std::fs::remove_dir_all(temp_path).ok();
     }
 
     let spotify = {

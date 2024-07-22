@@ -1,6 +1,6 @@
 [package]
 name = "ui-chan"
-version = "0.4.2"
+version = "0.4.3"
 edition = "2021"
 authors = ["Kimin Kim <kaytiz550@gmail.com>"]
 
