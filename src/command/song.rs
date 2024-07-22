@@ -30,10 +30,9 @@ impl std::error::Error for SongError {}
 #[derive(Copy, Clone, Default, poise::ChoiceParameter)]
 pub enum SongRequestTarget
 {
+    #[default]
     Play,
     Download,
-
-    #[default]
     All,
 }
 
