@@ -23,7 +23,13 @@ async fn main() {
         if let Ok(read_dir) = temp_path.read_dir() {
             for dir in read_dir {
                 if let Ok(dir) = dir {
-                    std::fs::remove_dir_all(dir.path()).ok();
+                    let dir_path = dir.path();
+                    if dir_path.is_dir() {
+                        std::fs::remove_dir_all(dir_path).ok();
+                    }
+                    else if dir_path.is_file() {
+                        std::fs::remove_file(dir_path).ok();
+                    }
                 }
             }
         }
