@@ -9,26 +9,60 @@ use crate::prelude::*;
 #[allow(non_camel_case_types)]
 #[derive(Default, Clone, Copy, poise::ChoiceParameter, strum::AsRefStr)]
 pub enum Model {
+
     #[default]
     ui16,
-    SaibaMomoi,
-    Villager,
-    Ayaka,
-    Eunsoo,
+
+    Eungoo,
     Sanghyeok,
     Y00NN0NG,
+
+    Arona,
+    HanaokaYuzu,
+    SaibaMomoi,
+    SaibaMidori,
+    TendouAlice,
+    HayaseYuuka,
+    TakanashiHoshino,
+
+    Ayaka,
+
+    Villager,
+    Lever,
+    Chest,
+
+    Yui,
+    GojoSatoru,
+    RyomenSukuna,
 }
 
 impl Model {
     pub fn friendly_name(&self) -> &'static str {
         match self {
+
             Self::ui16 => "しぐれうい (16歳)",
-            Self::SaibaMomoi => "才羽 モモイ",
+
+            Self::Eungoo => "은구",
+            Self::Sanghyeok => "상혁",
+            Self::Y00NN0NG => "윤농",
+
+            Self::Arona => "アロナ",
+            Self::HanaokaYuzu => "花岡ユズ",
+            Self::TendouAlice => "天童アリス",
+            Self::SaibaMomoi => "才羽モモイ",
+            Self::SaibaMidori => "才羽ミドリ",
+            Self::HayaseYuuka => "早瀬ユウカ",
+            Self::TakanashiHoshino => "小鳥遊ホシノ",
+            
+            Self::Ayaka => "아야카",
+
             Self::Villager => "주민",
-            Self::Ayaka => "神里綾華",
-            Self::Eunsoo => "김은수",
-            Self::Sanghyeok => "한상혁",
-            Self::Y00NN0NG => "Y00NN0NG",
+            Self::Lever => "레버",
+            Self::Chest => "상자",
+
+            Self::Yui => "Yui",
+            Self::GojoSatoru => "五条悟",
+            Self::RyomenSukuna => "両面宿儺",
         }
     }
 }
