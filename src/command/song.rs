@@ -340,17 +340,11 @@ pub async fn ai(ctx: Context<'_>, singer: rvc::Model, song: String, pitch: Optio
 
     let target = target.unwrap_or_default();
 
-    let mut draft_info = format!("request Song AI {} - {}", singer.friendly_name(), song);
-    if let Some(pitch) = pitch.as_ref() {
-        let prefix: &'static str = if *pitch > 0 {" +"} else {" "};
-        draft_info.push_str(&format!("{}{}", prefix, pitch.to_string()))
-    }
-
-    ctx.reply(draft_info).await?;
+    ctx.reply("...").await?;
 
     let youtube = data::song::Source::Chat(song).get_youtube(ctx.serenity_context()).await?;
 
-    let rvc_song = rvc::RVCSong::new(singer, youtube, pitch).await?;
+    let rvc_song = rvc::RVCSong::new(singer, youtube, pitch, target.should_download()).await?;
 
     // reply.delete(ctx).await?;
     
@@ -365,13 +359,11 @@ pub async fn ai(ctx: Context<'_>, singer: rvc::Model, song: String, pitch: Optio
         message.id
     ));
 
-    if target.should_play()
-    {
+    if target.should_play() {
         queue_internal(ctx.serenity_context(), request.clone()).await?;
     }
     
-    if target.should_download()
-    {
+    if target.should_download() {
         if let data::song::Source::RVC(rvc_song) = &request.source {
             let mp3 = rvc_song.mp3().await?;
             let mp3 = tokio::fs::File::open(mp3).await?;
