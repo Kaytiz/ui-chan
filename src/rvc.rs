@@ -49,7 +49,7 @@ pub struct RVCSharedData {
 }
 
 impl RVCSong {
-    pub async fn new(model: Model, mut youtube: YoutubeDl, pitch: Option<i32>) -> Result<Self, Error> {
+    pub async fn new(model: Model, mut youtube: YoutubeDl, pitch: Option<i32>, mp3: bool) -> Result<Self, Error> {
         let metadata = youtube.aux_metadata().await?;
 
         let id = chrono::offset::Local::now().format("%y%m%d_%H%M%S_%f").to_string();
@@ -170,38 +170,39 @@ impl RVCSong {
 
             // Inst pitchshift
             {
-                if let Some(pitch) = pitch.as_ref() {
-                    let normalized = (pitch + 6).rem_euclid(12) - 6;
-                    let freq_ratio = 2.0f64.powf(normalized as f64 / 12.0);
+                match pitch.as_ref() {
+                    Some(pitch) if *pitch != 0 => {
+                        let normalized = (pitch + 6).rem_euclid(12) - 6;
+                        let freq_ratio = 2.0f64.powf(normalized as f64 / 12.0);
 
-                    let inst_shift_out = std::process::Command::new("ffmpeg")
-                        .current_dir(&working_dir_thread)
-                        .arg("-i")
-                        .arg("kim_inst.wav")
-                        .arg("-af")
-                        .arg(format!("asetrate=44100*{freq_ratio},aresample=44100,atempo=1/{freq_ratio}"))
-                        .arg("mix_inst.wav")
-                        .output()?;
+                        let inst_shift_out = std::process::Command::new("ffmpeg")
+                            .current_dir(&working_dir_thread)
+                            .arg("-i")
+                            .arg("kim_inst.wav")
+                            .arg("-af")
+                            .arg(format!("asetrate=44100*{freq_ratio},aresample=44100,atempo=1/{freq_ratio}"))
+                            .arg("mix_inst.wav")
+                            .output()?;
 
-                    println!("inst_shift_out = {}", String::from_utf8_lossy(&inst_shift_out.stdout));
-                    println!("inst_shift_err = {}", String::from_utf8_lossy(&inst_shift_out.stderr));
+                        println!("inst_shift_out = {}", String::from_utf8_lossy(&inst_shift_out.stdout));
+                        println!("inst_shift_err = {}", String::from_utf8_lossy(&inst_shift_out.stderr));
 
-                    let harmony_shift_out = std::process::Command::new("ffmpeg")
-                        .current_dir(&working_dir_thread)
-                        .arg("-i")
-                        .arg("karaoke_harmony.wav")
-                        .arg("-af")
-                        .arg(format!("asetrate=44100*{freq_ratio},aresample=44100,atempo=1/{freq_ratio}"))
-                        .arg("mix_harmony.wav")
-                        .output()?;
+                        let harmony_shift_out = std::process::Command::new("ffmpeg")
+                            .current_dir(&working_dir_thread)
+                            .arg("-i")
+                            .arg("karaoke_harmony.wav")
+                            .arg("-af")
+                            .arg(format!("asetrate=44100*{freq_ratio},aresample=44100,atempo=1/{freq_ratio}"))
+                            .arg("mix_harmony.wav")
+                            .output()?;
 
-                    println!("harmony_shift_out = {}", String::from_utf8_lossy(&harmony_shift_out.stdout));
-                    println!("harmony_shift_err = {}", String::from_utf8_lossy(&harmony_shift_out.stderr));
-                }
-                else
-                {
-                    std::fs::rename(working_dir_thread.join("kim_inst.wav"), working_dir_thread.join("mix_inst.wav"))?;
-                    std::fs::rename(working_dir_thread.join("karaoke_harmony.wav"), working_dir_thread.join("mix_harmony.wav"))?;
+                        println!("harmony_shift_out = {}", String::from_utf8_lossy(&harmony_shift_out.stdout));
+                        println!("harmony_shift_err = {}", String::from_utf8_lossy(&harmony_shift_out.stderr));
+                    }
+                    _ => {
+                        std::fs::rename(working_dir_thread.join("kim_inst.wav"), working_dir_thread.join("mix_inst.wav"))?;
+                        std::fs::rename(working_dir_thread.join("karaoke_harmony.wav"), working_dir_thread.join("mix_harmony.wav"))?;
+                    }
                 }
             }
             
@@ -231,7 +232,7 @@ impl RVCSong {
                     .arg("-i")
                     .arg("rvc.wav")
                     .arg("-filter_complex")
-                    .arg("[0:a][1:a]amerge=inputs=2,pan=stereo|c0=c0+c2|c1=c1+c2[a]")
+                    .arg("[0:a][1:a]amerge=inputs=2,pan=stereo|c0=c0+1.5*c2|c1=c1+1.5*c2[a]")
                     .arg("-map")
                     .arg("[a]")
                     .arg("mixdown.wav")
