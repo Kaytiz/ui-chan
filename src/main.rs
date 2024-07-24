@@ -48,26 +48,7 @@ async fn main() {
                 prefix: Some("~!".into()),
                 ..Default::default()
             },
-            commands: {
-                let mut commands = vec![
-                    command::help(),
-                    command::owner::register(),
-                    command::owner::reload(),
-                    command::owner::save(),
-                    command::owner::channel::channel(),
-                    command::user::user(),
-                ];
-
-                #[allow(unused_mut)]
-                let mut command_song = command::song::song();
-            
-                #[cfg(feature = "rvc")]
-                command_song.subcommands.push(command::song::ai());
-
-                commands.push(command_song);
-
-                commands
-            },
+            commands: command::create_commands(),
             event_handler: |ctx, event, framework, data| {
                 Box::pin(event_handler::event_handler(ctx, event, framework, data))
             },

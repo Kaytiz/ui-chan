@@ -105,8 +105,8 @@ impl ModelMetadata {
 impl From<&ModelMetadata> for poise::CommandParameterChoice {
     fn from(value: &ModelMetadata) -> Self {
         Self {
-            name: value.name.clone(),
-            localizations: value.localizations.clone(),
+            name: value.select_name.clone(),
+            localizations: value.select_localizations.clone(),
             __non_exhaustive: (),
         }
     }
@@ -212,7 +212,6 @@ impl poise::ChoiceParameter for Model {
             .name_order
             .get(index)
             .map(|model_name| {
-                println!("from_index {} -> {}", index, model_name);
                 Self { name: model_name }
             })
     }
@@ -224,7 +223,6 @@ impl poise::ChoiceParameter for Model {
             .name_map
             .get(name)
             .map(|model_name| {
-                println!("from_name {} -> {}", name, model_name);
                 Self { name: model_name }
             })
     }
@@ -239,12 +237,27 @@ impl poise::ChoiceParameter for Model {
             .unwrap()
             .models_map
             .get(self.name)
-            .and_then(|m| m.localizations.get(locale))
+            .and_then(|m| m.select_localizations.get(locale))
             .map(|s| s.as_str())
     }
 
     fn name(&self) -> &'static str {
         self.name
+    }
+}
+
+impl Model {
+    fn display_name(&self, locale: Option<&str>) -> Option<&'static str> {
+        let library = model_library.lock().unwrap();
+            
+        let model = *library.models_map.get(self.name)?;
+        if let Some(locale) = locale {
+            if let Some(name) = model.localizations.get(locale) {
+                return Some(name.as_str());
+            }
+        }
+
+        return Some(model.name.as_str());
     }
 }
 
@@ -403,14 +416,14 @@ impl RVCSong {
                     .arg("--pth_path")
                     .arg(
                         Path::new("rvc")
-                            .join("models_map")
+                            .join("models")
                             .join(model.name())
                             .join("model.pth"),
                     )
                     .arg("--index_path")
                     .arg(
                         Path::new("rvc")
-                            .join("models_map")
+                            .join("models")
                             .join(model.name())
                             .join("model.index"),
                     );
@@ -584,13 +597,7 @@ impl RVCSong {
     }
 
     pub fn title(&self, locale: Option<&str>) -> String {
-        let model_name = match locale {
-            Some(locale) => self
-                .model
-                .localized_name(locale)
-                .unwrap_or(self.model.name()),
-            None => self.model.name(),
-        };
+        let model_name = self.model.display_name(locale).unwrap_or(self.model.name);
 
         if let Some(title) = self.metadata.title.as_ref() {
             format!("{} - {}", model_name, title)
@@ -608,6 +615,10 @@ impl std::fmt::Display for RVCSong {
 
 impl Drop for RVCSong {
     fn drop(&mut self) {
+        if cfg!(debug_assertion) {
+            return;
+        }
+
         if let Some(worker) = self.worker.take() {
             let working_dir = self.working_dir.clone();
             tokio::spawn(async move {

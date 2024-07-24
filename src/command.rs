@@ -22,3 +22,25 @@ pub async fn help(
     .await?;
     Ok(())
 }
+
+
+pub fn create_commands() -> Vec<poise::Command<Data, Error>> {
+    let mut commands = vec![
+        help(),
+        owner::register(),
+        owner::reload(),
+        owner::save(),
+        owner::channel::channel(),
+        user::user(),
+    ];
+
+    #[allow(unused_mut)]
+    let mut command_song = song::song();
+
+    #[cfg(feature = "rvc")]
+    command_song.subcommands.push(song::ai());
+
+    commands.push(command_song);
+
+    commands
+}

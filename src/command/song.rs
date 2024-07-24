@@ -350,7 +350,7 @@ pub async fn ai(ctx: Context<'_>, singer: rvc::Model, song: String, pitch: Optio
 
     // reply.delete(ctx).await?;
     
-    let name = rvc_song.to_string();
+    let name = rvc_song.title(ctx.locale());
     let message = ctx.channel_id().say(ctx, &name).await?;
     
     let request = Arc::new(data::song::Request::new(

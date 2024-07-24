@@ -15,7 +15,33 @@ pub async fn reload(ctx: Context<'_>) -> Result<(), Error> {
     #[cfg(feature = "rvc")]
     rvc::reload();
 
-    poise::builtins::register_application_commands(ctx, false).await?;
+    {
+        let is_bot_owner = ctx.framework().options().owners.contains(&ctx.author().id);
+        if !is_bot_owner {
+            ctx.say("Can only be used by bot owner").await?;
+            return Ok(());
+        }
+
+        let commands = crate::command::create_commands();
+
+        let commands_builder = poise::builtins::create_application_commands(&commands);
+        let num_commands = commands_builder.len();
+
+        let guild_id = match ctx.guild_id() {
+            Some(x) => x,
+            None => {
+                ctx.say("Must be called in guild").await?;
+                return Ok(());
+            }
+        };
+
+        ctx.say(format!("Registering {num_commands} commands..."))
+            .await?;
+        guild_id.set_commands(ctx, commands_builder).await?;
+
+        ctx.say("Done!").await?;
+    }
+
     Ok(())
 }
 
