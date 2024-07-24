@@ -1,5 +1,7 @@
 use std::{
-    collections::HashMap, ffi::OsString, path::{Path, PathBuf}
+    collections::HashMap,
+    ffi::OsString,
+    path::{Path, PathBuf},
 };
 
 use poise::ChoiceParameter;
@@ -9,12 +11,11 @@ use tracing::warn;
 
 use crate::prelude::*;
 
-
 #[allow(non_upper_case_globals)]
 static mut model_list_static: Option<[Option<ModelEntry>; 512]> = None;
 
 lazy_static::lazy_static! {
-    
+
     pub static ref model_library: std::sync::Arc<std::sync::Mutex<ModelLibrary>> = std::sync::Arc::new(std::sync::Mutex::new(ModelLibrary::load_or_warn()));
 }
 
@@ -53,7 +54,7 @@ impl ModelEntry {
                         if entry == &self {
                             return Some(entry);
                         }
-                    },
+                    }
                     None => {
                         *entry = Some(self);
                         return entry.as_ref();
@@ -69,14 +70,13 @@ impl ModelEntry {
 
 #[derive(Clone, PartialEq, Eq, Deserialize)]
 struct ModelMetadata {
-
-    #[serde(default)]
-    group: String,
-    
     name: String,
 
     #[serde(default)]
     localizations: std::collections::HashMap<String, String>,
+
+    #[serde(skip)]
+    group: String,
 
     #[serde(skip)]
     select_name: String,
@@ -86,16 +86,18 @@ struct ModelMetadata {
 }
 
 impl ModelMetadata {
-    fn assign_display_names(&mut self) {
-        let group = self.group.trim();
-        if group.is_empty() {
+    fn set_group(&mut self, group: &str) {
+        self.group = group.trim().to_string();
+        if self.group.is_empty() {
             self.select_name = self.name.clone();
             self.select_localizations = self.localizations.clone();
         } else {
             self.select_name = format!("{} - {}", self.group, self.name);
-            self.select_localizations = self.localizations.iter().map(|(k, v)| {
-                (k.clone(), format!("{} - {}", self.group, v))
-            }).collect();
+            self.select_localizations = self
+                .localizations
+                .iter()
+                .map(|(k, v)| (k.clone(), format!("{} - {}", self.group, v)))
+                .collect();
         }
     }
 }
@@ -118,27 +120,37 @@ pub struct ModelLibrary {
 }
 
 impl ModelLibrary {
-    
     fn load() -> Result<Self, Error> {
         let mut models_map = HashMap::new();
         let mut name_order = Vec::new();
         let mut name_map = HashMap::new();
-        
-        let models_map_path = Path::new("RVC_CLI").join("rvc").join("models");
-        
-        let model_list = std::fs::File::open(models_map_path.join("uidata.json"))?;
-        let mut model_list: Vec<ModelEntry> = serde_json::from_reader(model_list)?;
-        model_list.iter_mut().for_each(|v| v.metadata.assign_display_names());
 
-        let model_list = model_list;
-        
+        let models_map_path = Path::new("RVC_CLI").join("rvc").join("models");
+
+        let model_list = std::fs::File::open(models_map_path.join("uidata.json"))?;
+        let mut group_list: Vec<ModelGroup> = serde_json::from_reader(model_list)?;
+        for group in &mut group_list {
+            group
+                .models
+                .iter_mut()
+                .for_each(|m| m.metadata.set_group(&group.name))
+        }
+        let model_list: Vec<ModelEntry> = group_list
+            .into_iter()
+            .flat_map(|g| g.models.into_iter())
+            .collect();
+
         let num_models_map = model_list.len();
         models_map.reserve(num_models_map);
         name_map.reserve(num_models_map * 2);
 
         for model_entry in model_list {
-            let pth_path = models_map_path.join(&model_entry.raw_name).join("model.pth");
-            let index_path = models_map_path.join(&model_entry.raw_name).join("model.index");
+            let pth_path = models_map_path
+                .join(&model_entry.raw_name)
+                .join("model.pth");
+            let index_path = models_map_path
+                .join(&model_entry.raw_name)
+                .join("model.index");
             if !pth_path.exists() || !index_path.exists() {
                 warn!("model {} file not found", &model_entry.raw_name);
                 continue;
@@ -162,7 +174,7 @@ impl ModelLibrary {
         Ok(Self {
             models_map,
             name_order,
-            name_map
+            name_map,
         })
     }
 
@@ -178,7 +190,8 @@ impl ModelLibrary {
     }
 
     fn choice_list(&self) -> Vec<poise::CommandParameterChoice> {
-        self.name_order.iter()
+        self.name_order
+            .iter()
             .filter_map(|n| self.models_map.get(*n))
             .map(std::ops::Deref::deref)
             .map(poise::CommandParameterChoice::from)
@@ -192,19 +205,28 @@ pub struct Model {
 }
 
 impl poise::ChoiceParameter for Model {
-    
     fn from_index(index: usize) -> Option<Self> {
-        model_library.lock().unwrap().name_order.get(index).map(|model_name| {
-            println!("from_index {} -> {}", index, model_name);
-            Self { name: model_name }
-        })
+        model_library
+            .lock()
+            .unwrap()
+            .name_order
+            .get(index)
+            .map(|model_name| {
+                println!("from_index {} -> {}", index, model_name);
+                Self { name: model_name }
+            })
     }
 
     fn from_name(name: &str) -> Option<Self> {
-        model_library.lock().unwrap().name_map.get(name).map(|model_name| {
-            println!("from_name {} -> {}", name, model_name);
-            Self { name: model_name }
-        })
+        model_library
+            .lock()
+            .unwrap()
+            .name_map
+            .get(name)
+            .map(|model_name| {
+                println!("from_name {} -> {}", name, model_name);
+                Self { name: model_name }
+            })
     }
 
     fn list() -> Vec<poise::CommandParameterChoice> {
@@ -212,7 +234,11 @@ impl poise::ChoiceParameter for Model {
     }
 
     fn localized_name(&self, locale: &str) -> Option<&'static str> {
-        model_library.lock().unwrap().models_map.get(self.name)
+        model_library
+            .lock()
+            .unwrap()
+            .models_map
+            .get(self.name)
             .and_then(|m| m.localizations.get(locale))
             .map(|s| s.as_str())
     }
@@ -238,10 +264,17 @@ pub struct RVCSharedData {
 }
 
 impl RVCSong {
-    pub async fn new(model: Model, mut youtube: YoutubeDl, pitch: Option<i32>, export_mp3: bool) -> Result<Self, Error> {
+    pub async fn new(
+        model: Model,
+        mut youtube: YoutubeDl,
+        pitch: Option<i32>,
+        export_mp3: bool,
+    ) -> Result<Self, Error> {
         let metadata = youtube.aux_metadata().await?;
 
-        let id = chrono::offset::Local::now().format("%y%m%d_%H%M%S_%f").to_string();
+        let id = chrono::offset::Local::now()
+            .format("%y%m%d_%H%M%S_%f")
+            .to_string();
         let working_dir = Path::new("temp").join("rvc").join(id);
         let shared = std::sync::Arc::new(std::sync::Mutex::new(RVCSharedData::default()));
 
@@ -254,23 +287,29 @@ impl RVCSong {
 
             let find_file = |prefix: &str| -> Result<OsString, Error> {
                 let mut working_dir = std::fs::read_dir(&working_dir_thread)?;
-                let file = working_dir.find(
-                    |f| f.as_ref().is_ok_and(
-                        |f| f.file_name().to_str().is_some_and(
-                            |s| s.starts_with(prefix)
-                )));
+                let file = working_dir.find(|f| {
+                    f.as_ref().is_ok_and(|f| {
+                        f.file_name()
+                            .to_str()
+                            .is_some_and(|s| s.starts_with(prefix))
+                    })
+                });
                 Ok(file.ok_or(Error::from("cannot find file "))??.file_name())
             };
-            
+
             // download
             std::process::Command::new("yt-dlp")
                 .current_dir(&working_dir_thread)
                 .arg("-x")
                 .arg("-o")
                 .arg("source_dl")
-                .arg(metadata_thread.source_url.ok_or(Error::from("no source url"))?)
+                .arg(
+                    metadata_thread
+                        .source_url
+                        .ok_or(Error::from("no source url"))?,
+                )
                 .output()?;
-            
+
             let downloaded_file = find_file("source_dl")?;
 
             std::process::Command::new("ffmpeg")
@@ -282,80 +321,105 @@ impl RVCSong {
 
             // std::fs::remove_file(working_dir_thread.join(&downloaded_file))?;
 
-
             // extract with kim_vocal
             {
-                let uvr_out = std::process::Command::new(Path::new("audio-separator").join(".venv").join("Scripts").join("audio-separator.exe"))
-                    .current_dir(&working_dir_thread)
-                    .arg("source.wav")
-                    .arg("--model_filename")
-                    .arg("Kim_Vocal_2.onnx")
-                    .arg("--output_format")
-                    .arg("wav")
-                    .output()?;
+                let uvr_out = std::process::Command::new(
+                    Path::new("audio-separator")
+                        .join(".venv")
+                        .join("Scripts")
+                        .join("audio-separator.exe"),
+                )
+                .current_dir(&working_dir_thread)
+                .arg("source.wav")
+                .arg("--model_filename")
+                .arg("Kim_Vocal_2.onnx")
+                .arg("--output_format")
+                .arg("wav")
+                .output()?;
 
                 println!("uvr_out = {}", String::from_utf8_lossy(&uvr_out.stdout));
                 println!("uvr_err = {}", String::from_utf8_lossy(&uvr_out.stderr));
 
                 let source_vocals = find_file("source_(Vocals)")?;
                 let source_inst = find_file("source_(Instrumental)")?;
-                
-                std::fs::rename(working_dir_thread.join(&source_vocals), working_dir_thread.join("kim_vocals.wav"))?;
-                std::fs::rename(working_dir_thread.join(&source_inst), working_dir_thread.join("kim_inst.wav"))?;
+
+                std::fs::rename(
+                    working_dir_thread.join(&source_vocals),
+                    working_dir_thread.join("kim_vocals.wav"),
+                )?;
+                std::fs::rename(
+                    working_dir_thread.join(&source_inst),
+                    working_dir_thread.join("kim_inst.wav"),
+                )?;
             }
 
             // extract with karaoke
             {
-                let uvr_out = std::process::Command::new(Path::new("audio-separator").join(".venv").join("Scripts").join("audio-separator.exe"))
-                    .current_dir(&working_dir_thread)
-                    .arg("kim_vocals.wav")
-                    .arg("--model_filename")
-                    .arg("5_HP-Karaoke-UVR.pth")
-                    .arg("--output_format")
-                    .arg("wav")
-                    .output()?;
-                
+                let uvr_out = std::process::Command::new(
+                    Path::new("audio-separator")
+                        .join(".venv")
+                        .join("Scripts")
+                        .join("audio-separator.exe"),
+                )
+                .current_dir(&working_dir_thread)
+                .arg("kim_vocals.wav")
+                .arg("--model_filename")
+                .arg("5_HP-Karaoke-UVR.pth")
+                .arg("--output_format")
+                .arg("wav")
+                .output()?;
+
                 println!("uvr_out = {}", String::from_utf8_lossy(&uvr_out.stdout));
                 println!("uvr_err = {}", String::from_utf8_lossy(&uvr_out.stderr));
 
                 let source_vocals = find_file("kim_vocals_(Vocals)")?;
                 let source_inst = find_file("kim_vocals_(Instrumental)")?;
 
-                std::fs::rename(working_dir_thread.join(&source_vocals), working_dir_thread.join("karaoke_vocal.wav"))?;
-                std::fs::rename(working_dir_thread.join(&source_inst), working_dir_thread.join("karaoke_harmony.wav"))?;
+                std::fs::rename(
+                    working_dir_thread.join(&source_vocals),
+                    working_dir_thread.join("karaoke_vocal.wav"),
+                )?;
+                std::fs::rename(
+                    working_dir_thread.join(&source_inst),
+                    working_dir_thread.join("karaoke_harmony.wav"),
+                )?;
             }
 
             // convert
-            {                
-                let mut rvc = std::process::Command::new(Path::new("RVC_CLI").join("env").join("python.exe"));
+            {
+                let mut rvc =
+                    std::process::Command::new(Path::new("RVC_CLI").join("env").join("python.exe"));
 
-                rvc
-                    .current_dir("RVC_CLI")
-                    .arg("main.py")
-                    .arg("infer");
-                
+                rvc.current_dir("RVC_CLI").arg("main.py").arg("infer");
+
                 if let Some(pitch) = pitch {
-                    rvc
-                        .arg("--f0up_key")
-                        .arg(pitch.to_string());
+                    rvc.arg("--f0up_key").arg(pitch.to_string());
                 }
 
-                rvc
-                    .arg("--input_path")
+                rvc.arg("--input_path")
                     .arg(Path::new("..").join(working_dir_thread.join("karaoke_vocal.wav")))
                     .arg("--output_path")
                     .arg(Path::new("..").join(working_dir_thread.join("rvc.wav")))
                     .arg("--pth_path")
-                    .arg(Path::new("rvc").join("models_map").join(model.name()).join("model.pth"))
+                    .arg(
+                        Path::new("rvc")
+                            .join("models_map")
+                            .join(model.name())
+                            .join("model.pth"),
+                    )
                     .arg("--index_path")
-                    .arg(Path::new("rvc").join("models_map").join(model.name()).join("model.index"));
+                    .arg(
+                        Path::new("rvc")
+                            .join("models_map")
+                            .join(model.name())
+                            .join("model.index"),
+                    );
 
                 let rvc_out = rvc.output()?;
-                
+
                 println!("rvc_out = {}", String::from_utf8_lossy(&rvc_out.stdout));
                 println!("rvc_err = {}", String::from_utf8_lossy(&rvc_out.stderr));
             }
-
 
             // Inst pitchshift
             {
@@ -369,32 +433,53 @@ impl RVCSong {
                             .arg("-i")
                             .arg("kim_inst.wav")
                             .arg("-af")
-                            .arg(format!("asetrate=44100*{freq_ratio},aresample=44100,atempo=1/{freq_ratio}"))
+                            .arg(format!(
+                                "asetrate=44100*{freq_ratio},aresample=44100,atempo=1/{freq_ratio}"
+                            ))
                             .arg("mix_inst.wav")
                             .output()?;
 
-                        println!("inst_shift_out = {}", String::from_utf8_lossy(&inst_shift_out.stdout));
-                        println!("inst_shift_err = {}", String::from_utf8_lossy(&inst_shift_out.stderr));
+                        println!(
+                            "inst_shift_out = {}",
+                            String::from_utf8_lossy(&inst_shift_out.stdout)
+                        );
+                        println!(
+                            "inst_shift_err = {}",
+                            String::from_utf8_lossy(&inst_shift_out.stderr)
+                        );
 
                         let harmony_shift_out = std::process::Command::new("ffmpeg")
                             .current_dir(&working_dir_thread)
                             .arg("-i")
                             .arg("karaoke_harmony.wav")
                             .arg("-af")
-                            .arg(format!("asetrate=44100*{freq_ratio},aresample=44100,atempo=1/{freq_ratio}"))
+                            .arg(format!(
+                                "asetrate=44100*{freq_ratio},aresample=44100,atempo=1/{freq_ratio}"
+                            ))
                             .arg("mix_harmony.wav")
                             .output()?;
 
-                        println!("harmony_shift_out = {}", String::from_utf8_lossy(&harmony_shift_out.stdout));
-                        println!("harmony_shift_err = {}", String::from_utf8_lossy(&harmony_shift_out.stderr));
+                        println!(
+                            "harmony_shift_out = {}",
+                            String::from_utf8_lossy(&harmony_shift_out.stdout)
+                        );
+                        println!(
+                            "harmony_shift_err = {}",
+                            String::from_utf8_lossy(&harmony_shift_out.stderr)
+                        );
                     }
                     _ => {
-                        std::fs::rename(working_dir_thread.join("kim_inst.wav"), working_dir_thread.join("mix_inst.wav"))?;
-                        std::fs::rename(working_dir_thread.join("karaoke_harmony.wav"), working_dir_thread.join("mix_harmony.wav"))?;
+                        std::fs::rename(
+                            working_dir_thread.join("kim_inst.wav"),
+                            working_dir_thread.join("mix_inst.wav"),
+                        )?;
+                        std::fs::rename(
+                            working_dir_thread.join("karaoke_harmony.wav"),
+                            working_dir_thread.join("mix_harmony.wav"),
+                        )?;
                     }
                 }
             }
-            
 
             // merge
             {
@@ -411,8 +496,14 @@ impl RVCSong {
                     .arg("merge_inst.wav")
                     .output()?;
 
-                println!("merge_inst_out = {}", String::from_utf8_lossy(&merge_inst_out.stdout));
-                println!("merge_inst_err = {}", String::from_utf8_lossy(&merge_inst_out.stderr));
+                println!(
+                    "merge_inst_out = {}",
+                    String::from_utf8_lossy(&merge_inst_out.stdout)
+                );
+                println!(
+                    "merge_inst_err = {}",
+                    String::from_utf8_lossy(&merge_inst_out.stderr)
+                );
 
                 let merge_vocal_out = std::process::Command::new("ffmpeg")
                     .current_dir(&working_dir_thread)
@@ -427,8 +518,14 @@ impl RVCSong {
                     .arg("mixdown.wav")
                     .output()?;
 
-                println!("merge_vocal_out = {}", String::from_utf8_lossy(&merge_vocal_out.stdout));
-                println!("merge_vocal_err = {}", String::from_utf8_lossy(&merge_vocal_out.stderr));
+                println!(
+                    "merge_vocal_out = {}",
+                    String::from_utf8_lossy(&merge_vocal_out.stdout)
+                );
+                println!(
+                    "merge_vocal_err = {}",
+                    String::from_utf8_lossy(&merge_vocal_out.stderr)
+                );
             }
 
             // mp3
@@ -468,9 +565,7 @@ impl RVCSong {
 
     pub async fn wait(&self) -> Result<(), Error> {
         if let Some(worker) = self.worker.clone() {
-            tokio::task::spawn_blocking(move || {
-                while !worker.is_finished() {}
-            }).await?;
+            tokio::task::spawn_blocking(move || while !worker.is_finished() {}).await?;
         }
 
         Ok(())
@@ -490,14 +585,16 @@ impl RVCSong {
 
     pub fn title(&self, locale: Option<&str>) -> String {
         let model_name = match locale {
-            Some(locale) => self.model.localized_name(locale).unwrap_or(self.model.name()),
+            Some(locale) => self
+                .model
+                .localized_name(locale)
+                .unwrap_or(self.model.name()),
             None => self.model.name(),
         };
-        
+
         if let Some(title) = self.metadata.title.as_ref() {
             format!("{} - {}", model_name, title)
-        }
-        else {
+        } else {
             format!("{}", model_name)
         }
     }
