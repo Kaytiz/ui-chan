@@ -2,22 +2,105 @@ use std::{
     collections::HashMap, ffi::OsString, path::{Path, PathBuf}
 };
 
-use poise::{ChoiceParameter, CommandParameterChoice};
-use serde::{Deserialize, Serialize};
+use poise::ChoiceParameter;
+use serde::Deserialize;
 use songbird::input::{AuxMetadata, Compose, YoutubeDl};
 use tracing::warn;
 
 use crate::prelude::*;
 
-#[derive(Serialize, Deserialize)]
-struct ModelMetadata {
-    pub name: String,
 
-    #[serde(default)]
-    pub localizations: std::collections::HashMap<String, String>,
+#[allow(non_upper_case_globals)]
+static mut model_list_static: Option<[Option<ModelEntry>; 512]> = None;
+
+lazy_static::lazy_static! {
+    
+    pub static ref model_library: std::sync::Arc<std::sync::Mutex<ModelLibrary>> = std::sync::Arc::new(std::sync::Mutex::new(ModelLibrary::load_or_warn()));
 }
 
-impl From<&ModelMetadata> for CommandParameterChoice {
+pub fn reload() {
+    *model_library.lock().unwrap() = ModelLibrary::load_or_warn();
+}
+
+#[derive(PartialEq, Eq, Deserialize)]
+struct ModelGroup {
+    #[serde(default, rename = "group_name")]
+    name: String,
+
+    models: Vec<ModelEntry>,
+}
+
+#[derive(PartialEq, Eq, Deserialize)]
+struct ModelEntry {
+    raw_name: String,
+
+    #[serde(flatten)]
+    metadata: ModelMetadata,
+}
+
+impl ModelEntry {
+    fn register(self) -> Option<&'static Self> {
+        unsafe {
+            if model_list_static.is_none() {
+                model_list_static = Some(std::array::from_fn(|_| None));
+            }
+
+            let model_list = model_list_static.as_mut().unwrap();
+
+            for entry in model_list.iter_mut() {
+                match entry {
+                    Some(entry) => {
+                        if entry == &self {
+                            return Some(entry);
+                        }
+                    },
+                    None => {
+                        *entry = Some(self);
+                        return entry.as_ref();
+                    }
+                }
+            }
+
+            warn!("model overflow");
+            None
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Deserialize)]
+struct ModelMetadata {
+
+    #[serde(default)]
+    group: String,
+    
+    name: String,
+
+    #[serde(default)]
+    localizations: std::collections::HashMap<String, String>,
+
+    #[serde(skip)]
+    select_name: String,
+
+    #[serde(skip)]
+    select_localizations: std::collections::HashMap<String, String>,
+}
+
+impl ModelMetadata {
+    fn assign_display_names(&mut self) {
+        let group = self.group.trim();
+        if group.is_empty() {
+            self.select_name = self.name.clone();
+            self.select_localizations = self.localizations.clone();
+        } else {
+            self.select_name = format!("{} - {}", self.group, self.name);
+            self.select_localizations = self.localizations.iter().map(|(k, v)| {
+                (k.clone(), format!("{} - {}", self.group, v))
+            }).collect();
+        }
+    }
+}
+
+impl From<&ModelMetadata> for poise::CommandParameterChoice {
     fn from(value: &ModelMetadata) -> Self {
         Self {
             name: value.name.clone(),
@@ -27,91 +110,80 @@ impl From<&ModelMetadata> for CommandParameterChoice {
     }
 }
 
+#[derive(Default)]
 pub struct ModelLibrary {
-    models: HashMap<String, ModelMetadata>,
-    name_index: Vec<String>,
-    name_map: HashMap<String, String>,
+    models_map: HashMap<&'static str, &'static ModelMetadata>,
+    name_order: Vec<&'static str>,
+    name_map: HashMap<&'static str, &'static str>,
 }
 
 impl ModelLibrary {
-    fn load() -> Self {
-        let mut models = HashMap::new();
-        let mut name_index = Vec::new();
+    
+    fn load() -> Result<Self, Error> {
+        let mut models_map = HashMap::new();
+        let mut name_order = Vec::new();
         let mut name_map = HashMap::new();
+        
+        let models_map_path = Path::new("RVC_CLI").join("rvc").join("models");
+        
+        let model_list = std::fs::File::open(models_map_path.join("uidata.json"))?;
+        let mut model_list: Vec<ModelEntry> = serde_json::from_reader(model_list)?;
+        model_list.iter_mut().for_each(|v| v.metadata.assign_display_names());
 
-        let models_path = Path::new("RVC_CLI").join("rvc").join("models");
-        match std::fs::read_dir(&models_path) {
-            Ok(models_dir) => {
-                let (num_models, _) = models_dir.size_hint();
-                models.reserve(num_models);
-                name_map.reserve(num_models * 2);
+        let model_list = model_list;
+        
+        let num_models_map = model_list.len();
+        models_map.reserve(num_models_map);
+        name_map.reserve(num_models_map * 2);
 
-
-                for dir in models_dir {
-                    let dir = match dir {
-                        Ok(dir) => dir,
-                        Err(_) => continue,
-                    };
-
-                    let raw_name = match dir.file_name().to_str() {
-                        Some(str) => str.to_string(),
-                        None => {
-                            warn!("model name {:?} failed to convert string", dir.file_name());
-                            continue
-                        },
-                    };
-
-                    let uidata_path = dir.path().join("uidata.json");
-                    if !uidata_path.exists() {
-                        warn!("model {} doesn't have uidata.json", raw_name);
-                        continue
-                    }
-                    
-                    let file = match std::fs::File::open(uidata_path) {
-                        Ok(file) => file,
-                        Err(e) => {
-                            warn!("model {} failed read uidata. error = {}", raw_name, e);
-                            continue
-                        }
-                    };
-
-                    let ui_data: ModelMetadata = match serde_json::from_reader(file) {
-                        Ok(ui_data) => ui_data,
-                        Err(e) => {
-                            warn!("model {} failed to parse uidata. error = {}", raw_name, e);
-                            continue
-                        }
-                    };
-
-                    name_index.push(raw_name.clone());
-                    
-                    name_map.insert(raw_name.clone(), raw_name.clone());
-                    for (_, name) in ui_data.localizations.iter() {
-                        name_map.insert(name.clone(), raw_name.clone());
-                    }
-
-                    models.insert(raw_name, ui_data);
-                }
-            },
-            Err(e) => {
-                warn!("Failed to find model path {:?}, error = {}", models_path, e);
+        for model_entry in model_list {
+            let pth_path = models_map_path.join(&model_entry.raw_name).join("model.pth");
+            let index_path = models_map_path.join(&model_entry.raw_name).join("model.index");
+            if !pth_path.exists() || !index_path.exists() {
+                warn!("model {} file not found", &model_entry.raw_name);
+                continue;
             }
-        };
 
-        Self {
-            models,
-            name_index,
+            let model_entry = match model_entry.register() {
+                Some(entry) => entry,
+                None => continue,
+            };
+
+            name_order.push(model_entry.raw_name.as_str());
+
+            name_map.insert(model_entry.raw_name.as_str(), model_entry.raw_name.as_str());
+            for (_, name) in model_entry.metadata.localizations.iter() {
+                name_map.insert(name.as_str(), model_entry.raw_name.as_str());
+            }
+
+            models_map.insert(model_entry.raw_name.as_str(), &model_entry.metadata);
+        }
+
+        Ok(Self {
+            models_map,
+            name_order,
             name_map
+        })
+    }
+
+    fn load_or_warn() -> ModelLibrary {
+        let library = Self::load();
+        match library {
+            Ok(library) => library,
+            Err(e) => {
+                warn!("failed to load rvc library, e = {}", e);
+                Default::default()
+            }
         }
     }
 
     fn choice_list(&self) -> Vec<poise::CommandParameterChoice> {
-        self.models.iter().map(|t| t.1.into()).collect()
+        self.name_order.iter()
+            .filter_map(|n| self.models_map.get(*n))
+            .map(std::ops::Deref::deref)
+            .map(poise::CommandParameterChoice::from)
+            .collect()
     }
-}
-
-lazy_static::lazy_static! {
-    pub static ref model_library: ModelLibrary = ModelLibrary::load();
 }
 
 #[derive(Clone, Copy)]
@@ -122,140 +194,33 @@ pub struct Model {
 impl poise::ChoiceParameter for Model {
     
     fn from_index(index: usize) -> Option<Self> {
-        model_library.name_index.get(index).map(|name| {
-            Self { name: name.as_str() }
+        model_library.lock().unwrap().name_order.get(index).map(|model_name| {
+            println!("from_index {} -> {}", index, model_name);
+            Self { name: model_name }
         })
     }
 
     fn from_name(name: &str) -> Option<Self> {
-        model_library.name_map.get(name).map(|name| {
-            Self { name: name.as_str() }
+        model_library.lock().unwrap().name_map.get(name).map(|model_name| {
+            println!("from_name {} -> {}", name, model_name);
+            Self { name: model_name }
         })
     }
 
     fn list() -> Vec<poise::CommandParameterChoice> {
-        model_library.choice_list()
+        model_library.lock().unwrap().choice_list()
     }
 
     fn localized_name(&self, locale: &str) -> Option<&'static str> {
-        model_library.models.get(self.name)
-        .and_then(|m| m.localizations.get(locale))
-        .map(|s| s.as_str())
+        model_library.lock().unwrap().models_map.get(self.name)
+            .and_then(|m| m.localizations.get(locale))
+            .map(|s| s.as_str())
     }
 
     fn name(&self) -> &'static str {
         self.name
     }
 }
-
-
-// #[allow(non_camel_case_types)]
-// #[derive(Default, Clone, Copy, poise::ChoiceParameter)]
-// pub enum Model {
-
-//     // ~ V-Tuber
-
-//     #[default]
-//     #[name = "Shigure UI (16)"]
-//     #[name_localized("ja", "しぐれうい (16歳)")]
-//     #[name_localized("ko", "시구레 우이 (16세)")]
-//     ui16,
-
-
-//     // ~ AMM
-
-//     #[name = "Eungoo"]
-//     #[name_localized("ja", "ウング")]
-//     #[name_localized("ko", "은구")]
-//     Eungoo,
-
-//     #[name = "Sanghyeok"]
-//     #[name_localized("ja", "サンヒョク")]
-//     #[name_localized("ko", "상혁")]
-//     Sanghyeok,
-
-//     #[name = "Y00NN0NG"]
-//     #[name_localized("ja", "ユンノン")]
-//     #[name_localized("ko", "윤농")]
-//     Y00NN0NG,
-
-
-//     // ~ Blue Archive
-
-//     #[name = "Arona"]
-//     #[name_localized("ja", "アロナ")]
-//     #[name_localized("ko", "아로나")]
-//     Arona,
-
-//     #[name = "Hanaoka Yuzu"]
-//     #[name_localized("ja", "花岡ユズ")]
-//     #[name_localized("ko", "하나오카 유즈")]
-//     HanaokaYuzu,
-
-//     #[name = "Saiba Momoi"]
-//     #[name_localized("ja", "才羽モモイ")]
-//     #[name_localized("ko", "사이바 모모이")]
-//     SaibaMomoi,
-
-//     #[name = "Saiba Midori"]
-//     #[name_localized("ja", "才羽ミドリ")]
-//     #[name_localized("ko", "사이바 미도리")]
-//     SaibaMidori,
-
-//     #[name = "Tendou Aris"]
-//     #[name_localized("ja", "天童アリス")]
-//     #[name_localized("ko", "텐도 아리스")]
-//     TendouAlice,
-
-//     #[name = "Hayase Yuuka"]
-//     #[name_localized("ja", "早瀬ユウカ")]
-//     #[name_localized("ko", "하야세 유우카")]
-//     HayaseYuuka,
-
-//     #[name = "Takanashi Hoshino"]
-//     #[name_localized("ja", "小鳥遊ホシノ")]
-//     #[name_localized("ko", "타카나시 호시노")]
-//     TakanashiHoshino,
-
-//     // ~ Mihoyo
-    
-//     #[name = "Kamisato Ayaka"]
-//     #[name_localized("ja", "神里綾華")]
-//     #[name_localized("ko", "카미사토 아야카")]
-//     KamisatoAyaka,
-
-//     // ~ Minecraft
-
-//     #[name = "Villager"]
-//     #[name_localized("ja", "村人")]
-//     #[name_localized("ko", "주민")]
-//     Villager,
-
-//     #[name = "Chest"]
-//     #[name_localized("ja", "チェスト")]
-//     #[name_localized("ko", "상자")]
-//     Chest,
-    
-//     #[name = "Lever"]
-//     #[name_localized("ja", "レバー")]
-//     #[name_localized("ko", "레버")]
-//     Lever,
-
-//     // ~ etc
-
-//     #[name = "Yui"]
-//     Yui,
-    
-//     #[name = "Gojo Satoru"]
-//     #[name_localized("ja", "五条悟")]
-//     #[name_localized("ko", "고죠 사토루")]
-//     GojoSatoru,
-
-//     #[name = "Ryomen Sukuna"]
-//     #[name_localized("ja", "両面宿儺")]
-//     #[name_localized("ko", "료멘스쿠나")]
-//     RyomenSukuna,
-// }
 
 pub struct RVCSong {
     pub model: Model,
@@ -381,9 +346,9 @@ impl RVCSong {
                     .arg("--output_path")
                     .arg(Path::new("..").join(working_dir_thread.join("rvc.wav")))
                     .arg("--pth_path")
-                    .arg(Path::new("rvc").join("models").join(model.name()).join("model.pth"))
+                    .arg(Path::new("rvc").join("models_map").join(model.name()).join("model.pth"))
                     .arg("--index_path")
-                    .arg(Path::new("rvc").join("models").join(model.name()).join("model.index"));
+                    .arg(Path::new("rvc").join("models_map").join(model.name()).join("model.index"));
 
                 let rvc_out = rvc.output()?;
                 

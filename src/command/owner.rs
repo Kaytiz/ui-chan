@@ -1,4 +1,4 @@
-use crate::{data, prelude::*};
+use crate::{data, prelude::*, rvc};
 
 /// 명령어를 등록합니다.
 #[poise::command(prefix_command, owners_only)]
@@ -11,6 +11,10 @@ pub async fn register(ctx: Context<'_>) -> Result<(), Error> {
 #[poise::command(slash_command, owners_only)]
 pub async fn reload(ctx: Context<'_>) -> Result<(), Error> {  
     serenity::Command::set_global_commands(ctx, vec![]).await?;
+
+    #[cfg(feature = "rvc")]
+    rvc::reload();
+
     poise::builtins::register_application_commands(ctx, false).await?;
     Ok(())
 }
