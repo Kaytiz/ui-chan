@@ -38,6 +38,7 @@ pub enum SongRequestTarget
 
 impl SongRequestTarget {
 
+    #[allow(dead_code)]
     pub fn should_play(&self) -> bool {
         match self {
             SongRequestTarget::Play => true,
@@ -46,6 +47,7 @@ impl SongRequestTarget {
         }
     }
 
+    #[allow(dead_code)]
     pub fn should_download(&self) -> bool {
         match self {
             SongRequestTarget::Play => false,
@@ -175,7 +177,7 @@ pub async fn play_internal(
     let (handle, title_future) = {
         let mut guild_data = guild_data.lock().await;
 
-        let (input, title_future) = request.source.get_input(ctx).await?;
+        let (input, title_future) = request.source.get_input(ctx, request.locale.as_deref()).await?;
 
         let handle = {
             let call = join_or_get(ctx, request.guild_id, Some(request.author_id)).await?;
@@ -271,7 +273,7 @@ pub async fn next_internal(
                     Ok(_) => return Ok(()),
                     Err(e) => {
                         if let Ok(message) = ctx.http.get_message(next.channel_id, next.message_id).await {
-                            let error_message = format!("error : {:?}", e);
+                            let error_message: String = format!("error : {:?}", e);
                             message.reply(ctx, error_message).await?;
                         }
                         next.remove_react_queue(ctx).await.ok();
@@ -289,7 +291,7 @@ pub async fn next_internal(
 #[poise::command(
     slash_command,
     guild_only,
-    subcommands("join", "leave", "stop", "next", "ai"),
+    subcommands("join", "leave", "stop", "next"),
     subcommand_required
 )]
 pub async fn song(_: Context<'_>) -> Result<(), Error> {
@@ -356,7 +358,8 @@ pub async fn ai(ctx: Context<'_>, singer: rvc::Model, song: String, pitch: Optio
         ctx.guild_id().expect("This command can only be used within guilds."), 
         ctx.author().id,
         ctx.channel_id(),
-        message.id
+        message.id,
+        ctx.locale()
     ));
 
     if target.should_play() {

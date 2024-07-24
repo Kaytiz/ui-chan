@@ -64,7 +64,7 @@ async fn youtubedl_get_title_async(mut youtubedl: songbird::input::YoutubeDl, op
 }
 
 impl Source {
-    pub async fn get_input(&self, ctx: &serenity::Context) -> Result<(songbird::input::Input, std::pin::Pin<Box<dyn futures::Future<Output = Option<String>> + Send>>), Error> {
+    pub async fn get_input(&self, ctx: &serenity::Context, #[allow(unused_variables)] locale: Option<&str>) -> Result<(songbird::input::Input, std::pin::Pin<Box<dyn futures::Future<Output = Option<String>> + Send>>), Error> {
         match self {
             Self::Chat(_) => {
                 let source = self.get_youtube(ctx).await?;
@@ -79,10 +79,12 @@ impl Source {
                     return Err(Error::from("RVC Failed"));
                 }
 
-                let youtube_source = rvc_song.youtube.clone();
-                let title = youtubedl_get_title_async(youtube_source, None);
+                let title = rvc_song.title(locale);
+                let title_future = async move {
+                    Some(title)
+                };
 
-                Ok((songbird::input::File::new(file).into(), Box::pin(title)))
+                Ok((songbird::input::File::new(file).into(), Box::pin(title_future)))
             }
         }
     }
@@ -139,6 +141,7 @@ pub struct Request {
     pub author_id: serenity::UserId,
     pub channel_id: serenity::ChannelId,
     pub message_id: serenity::MessageId,
+    pub locale: Option<String>
 }
 
 impl Request {
@@ -152,6 +155,7 @@ impl Request {
         author_id: serenity::UserId,
         channel_id: serenity::ChannelId,
         message_id: serenity::MessageId,
+        locale: Option<impl Into<String>>,
     ) -> Self {
         Self {
             source,
@@ -159,6 +163,7 @@ impl Request {
             author_id,
             channel_id,
             message_id,
+            locale: locale.map(Into::into),
         }
     }
 
@@ -221,6 +226,7 @@ impl From<&serenity::Message> for Request {
             value.author.id,
             value.channel_id,
             value.id,
+            value.author.locale.as_ref(),
         )
     }
 }

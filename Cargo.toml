@@ -30,8 +30,7 @@ reqwest = "0.11"
 futures = "0.3.30"
 rspotify = { version = "0.13.2", features = ["env-file"] }
 uuid = "1.10.0"
-strum = "0.26.3"
-strum_macros = "0.26.4"
+lazy_static = "1.5.0"
 
 
 [build-dependencies]

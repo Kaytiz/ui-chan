@@ -7,6 +7,14 @@ pub async fn register(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
+/// 명령어를 등록합니다.
+#[poise::command(slash_command, owners_only)]
+pub async fn reload(ctx: Context<'_>) -> Result<(), Error> {  
+    serenity::Command::set_global_commands(ctx, vec![]).await?;
+    poise::builtins::register_application_commands(ctx, false).await?;
+    Ok(())
+}
+
 /// 봇의 데이터를 저장합니다.
 #[poise::command(slash_command, owners_only)]
 pub async fn save(ctx: Context<'_>) -> Result<(), Error> {

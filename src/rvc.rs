@@ -1,71 +1,261 @@
 use std::{
-    ffi::OsString, path::{Path, PathBuf}
+    collections::HashMap, ffi::OsString, path::{Path, PathBuf}
 };
 
+use poise::{ChoiceParameter, CommandParameterChoice};
+use serde::{Deserialize, Serialize};
 use songbird::input::{AuxMetadata, Compose, YoutubeDl};
+use tracing::warn;
 
 use crate::prelude::*;
 
-#[allow(non_camel_case_types)]
-#[derive(Default, Clone, Copy, poise::ChoiceParameter, strum::AsRefStr)]
-pub enum Model {
+#[derive(Serialize, Deserialize)]
+struct ModelMetadata {
+    pub name: String,
 
-    #[default]
-    ui16,
-
-    Eungoo,
-    Sanghyeok,
-    Y00NN0NG,
-
-    Arona,
-    HanaokaYuzu,
-    SaibaMomoi,
-    SaibaMidori,
-    TendouAlice,
-    HayaseYuuka,
-    TakanashiHoshino,
-
-    Ayaka,
-
-    Villager,
-    Lever,
-    Chest,
-
-    Yui,
-    GojoSatoru,
-    RyomenSukuna,
+    #[serde(default)]
+    pub localizations: std::collections::HashMap<String, String>,
 }
 
-impl Model {
-    pub fn friendly_name(&self) -> &'static str {
-        match self {
-
-            Self::ui16 => "しぐれうい (16歳)",
-
-            Self::Eungoo => "은구",
-            Self::Sanghyeok => "상혁",
-            Self::Y00NN0NG => "윤농",
-
-            Self::Arona => "アロナ",
-            Self::HanaokaYuzu => "花岡ユズ",
-            Self::TendouAlice => "天童アリス",
-            Self::SaibaMomoi => "才羽モモイ",
-            Self::SaibaMidori => "才羽ミドリ",
-            Self::HayaseYuuka => "早瀬ユウカ",
-            Self::TakanashiHoshino => "小鳥遊ホシノ",
-            
-            Self::Ayaka => "아야카",
-
-            Self::Villager => "주민",
-            Self::Lever => "레버",
-            Self::Chest => "상자",
-
-            Self::Yui => "Yui",
-            Self::GojoSatoru => "五条悟",
-            Self::RyomenSukuna => "両面宿儺",
+impl From<&ModelMetadata> for CommandParameterChoice {
+    fn from(value: &ModelMetadata) -> Self {
+        Self {
+            name: value.name.clone(),
+            localizations: value.localizations.clone(),
+            __non_exhaustive: (),
         }
     }
 }
+
+pub struct ModelLibrary {
+    models: HashMap<String, ModelMetadata>,
+    name_index: Vec<String>,
+    name_map: HashMap<String, String>,
+}
+
+impl ModelLibrary {
+    fn load() -> Self {
+        let mut models = HashMap::new();
+        let mut name_index = Vec::new();
+        let mut name_map = HashMap::new();
+
+        let models_path = Path::new("RVC_CLI").join("rvc").join("models");
+        match std::fs::read_dir(&models_path) {
+            Ok(models_dir) => {
+                let (num_models, _) = models_dir.size_hint();
+                models.reserve(num_models);
+                name_map.reserve(num_models * 2);
+
+
+                for dir in models_dir {
+                    let dir = match dir {
+                        Ok(dir) => dir,
+                        Err(_) => continue,
+                    };
+
+                    let raw_name = match dir.file_name().to_str() {
+                        Some(str) => str.to_string(),
+                        None => {
+                            warn!("model name {:?} failed to convert string", dir.file_name());
+                            continue
+                        },
+                    };
+
+                    let uidata_path = dir.path().join("uidata.json");
+                    if !uidata_path.exists() {
+                        warn!("model {} doesn't have uidata.json", raw_name);
+                        continue
+                    }
+                    
+                    let file = match std::fs::File::open(uidata_path) {
+                        Ok(file) => file,
+                        Err(e) => {
+                            warn!("model {} failed read uidata. error = {}", raw_name, e);
+                            continue
+                        }
+                    };
+
+                    let ui_data: ModelMetadata = match serde_json::from_reader(file) {
+                        Ok(ui_data) => ui_data,
+                        Err(e) => {
+                            warn!("model {} failed to parse uidata. error = {}", raw_name, e);
+                            continue
+                        }
+                    };
+
+                    name_index.push(raw_name.clone());
+                    
+                    name_map.insert(raw_name.clone(), raw_name.clone());
+                    for (_, name) in ui_data.localizations.iter() {
+                        name_map.insert(name.clone(), raw_name.clone());
+                    }
+
+                    models.insert(raw_name, ui_data);
+                }
+            },
+            Err(e) => {
+                warn!("Failed to find model path {:?}, error = {}", models_path, e);
+            }
+        };
+
+        Self {
+            models,
+            name_index,
+            name_map
+        }
+    }
+
+    fn choice_list(&self) -> Vec<poise::CommandParameterChoice> {
+        self.models.iter().map(|t| t.1.into()).collect()
+    }
+}
+
+lazy_static::lazy_static! {
+    pub static ref model_library: ModelLibrary = ModelLibrary::load();
+}
+
+#[derive(Clone, Copy)]
+pub struct Model {
+    name: &'static str,
+}
+
+impl poise::ChoiceParameter for Model {
+    
+    fn from_index(index: usize) -> Option<Self> {
+        model_library.name_index.get(index).map(|name| {
+            Self { name: name.as_str() }
+        })
+    }
+
+    fn from_name(name: &str) -> Option<Self> {
+        model_library.name_map.get(name).map(|name| {
+            Self { name: name.as_str() }
+        })
+    }
+
+    fn list() -> Vec<poise::CommandParameterChoice> {
+        model_library.choice_list()
+    }
+
+    fn localized_name(&self, locale: &str) -> Option<&'static str> {
+        model_library.models.get(self.name)
+        .and_then(|m| m.localizations.get(locale))
+        .map(|s| s.as_str())
+    }
+
+    fn name(&self) -> &'static str {
+        self.name
+    }
+}
+
+
+// #[allow(non_camel_case_types)]
+// #[derive(Default, Clone, Copy, poise::ChoiceParameter)]
+// pub enum Model {
+
+//     // ~ V-Tuber
+
+//     #[default]
+//     #[name = "Shigure UI (16)"]
+//     #[name_localized("ja", "しぐれうい (16歳)")]
+//     #[name_localized("ko", "시구레 우이 (16세)")]
+//     ui16,
+
+
+//     // ~ AMM
+
+//     #[name = "Eungoo"]
+//     #[name_localized("ja", "ウング")]
+//     #[name_localized("ko", "은구")]
+//     Eungoo,
+
+//     #[name = "Sanghyeok"]
+//     #[name_localized("ja", "サンヒョク")]
+//     #[name_localized("ko", "상혁")]
+//     Sanghyeok,
+
+//     #[name = "Y00NN0NG"]
+//     #[name_localized("ja", "ユンノン")]
+//     #[name_localized("ko", "윤농")]
+//     Y00NN0NG,
+
+
+//     // ~ Blue Archive
+
+//     #[name = "Arona"]
+//     #[name_localized("ja", "アロナ")]
+//     #[name_localized("ko", "아로나")]
+//     Arona,
+
+//     #[name = "Hanaoka Yuzu"]
+//     #[name_localized("ja", "花岡ユズ")]
+//     #[name_localized("ko", "하나오카 유즈")]
+//     HanaokaYuzu,
+
+//     #[name = "Saiba Momoi"]
+//     #[name_localized("ja", "才羽モモイ")]
+//     #[name_localized("ko", "사이바 모모이")]
+//     SaibaMomoi,
+
+//     #[name = "Saiba Midori"]
+//     #[name_localized("ja", "才羽ミドリ")]
+//     #[name_localized("ko", "사이바 미도리")]
+//     SaibaMidori,
+
+//     #[name = "Tendou Aris"]
+//     #[name_localized("ja", "天童アリス")]
+//     #[name_localized("ko", "텐도 아리스")]
+//     TendouAlice,
+
+//     #[name = "Hayase Yuuka"]
+//     #[name_localized("ja", "早瀬ユウカ")]
+//     #[name_localized("ko", "하야세 유우카")]
+//     HayaseYuuka,
+
+//     #[name = "Takanashi Hoshino"]
+//     #[name_localized("ja", "小鳥遊ホシノ")]
+//     #[name_localized("ko", "타카나시 호시노")]
+//     TakanashiHoshino,
+
+//     // ~ Mihoyo
+    
+//     #[name = "Kamisato Ayaka"]
+//     #[name_localized("ja", "神里綾華")]
+//     #[name_localized("ko", "카미사토 아야카")]
+//     KamisatoAyaka,
+
+//     // ~ Minecraft
+
+//     #[name = "Villager"]
+//     #[name_localized("ja", "村人")]
+//     #[name_localized("ko", "주민")]
+//     Villager,
+
+//     #[name = "Chest"]
+//     #[name_localized("ja", "チェスト")]
+//     #[name_localized("ko", "상자")]
+//     Chest,
+    
+//     #[name = "Lever"]
+//     #[name_localized("ja", "レバー")]
+//     #[name_localized("ko", "레버")]
+//     Lever,
+
+//     // ~ etc
+
+//     #[name = "Yui"]
+//     Yui,
+    
+//     #[name = "Gojo Satoru"]
+//     #[name_localized("ja", "五条悟")]
+//     #[name_localized("ko", "고죠 사토루")]
+//     GojoSatoru,
+
+//     #[name = "Ryomen Sukuna"]
+//     #[name_localized("ja", "両面宿儺")]
+//     #[name_localized("ko", "료멘스쿠나")]
+//     RyomenSukuna,
+// }
 
 pub struct RVCSong {
     pub model: Model,
@@ -83,7 +273,7 @@ pub struct RVCSharedData {
 }
 
 impl RVCSong {
-    pub async fn new(model: Model, mut youtube: YoutubeDl, pitch: Option<i32>, mp3: bool) -> Result<Self, Error> {
+    pub async fn new(model: Model, mut youtube: YoutubeDl, pitch: Option<i32>, export_mp3: bool) -> Result<Self, Error> {
         let metadata = youtube.aux_metadata().await?;
 
         let id = chrono::offset::Local::now().format("%y%m%d_%H%M%S_%f").to_string();
@@ -191,9 +381,9 @@ impl RVCSong {
                     .arg("--output_path")
                     .arg(Path::new("..").join(working_dir_thread.join("rvc.wav")))
                     .arg("--pth_path")
-                    .arg(Path::new("rvc").join("models").join(model.as_ref()).join("model.pth"))
+                    .arg(Path::new("rvc").join("models").join(model.name()).join("model.pth"))
                     .arg("--index_path")
-                    .arg(Path::new("rvc").join("models").join(model.as_ref()).join("model.index"));
+                    .arg(Path::new("rvc").join("models").join(model.name()).join("model.index"));
 
                 let rvc_out = rvc.output()?;
                 
@@ -277,7 +467,7 @@ impl RVCSong {
             }
 
             // mp3
-            {
+            if export_mp3 {
                 let mp3_out = std::process::Command::new("ffmpeg")
                     .current_dir(&working_dir_thread)
                     .arg("-i")
@@ -332,16 +522,25 @@ impl RVCSong {
         let shared = self.shared.lock().unwrap();
         shared.mp3.clone().ok_or(Error::from("failed"))
     }
+
+    pub fn title(&self, locale: Option<&str>) -> String {
+        let model_name = match locale {
+            Some(locale) => self.model.localized_name(locale).unwrap_or(self.model.name()),
+            None => self.model.name(),
+        };
+        
+        if let Some(title) = self.metadata.title.as_ref() {
+            format!("{} - {}", model_name, title)
+        }
+        else {
+            format!("{}", model_name)
+        }
+    }
 }
 
 impl std::fmt::Display for RVCSong {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if let Some(title) = self.metadata.title.as_ref() {
-            write!(f, "{} - {}", self.model.friendly_name(), title)
-        }
-        else {
-            write!(f, "{}", self.model.friendly_name())
-        }
+        write!(f, "{}", self.title(None))
     }
 }
 
