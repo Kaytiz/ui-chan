@@ -1,11 +1,9 @@
 use std::{
-    collections::HashMap,
-    ffi::OsString,
-    path::{Path, PathBuf},
+    collections::HashMap, path::{Path, PathBuf}
 };
-
-use poise::ChoiceParameter;
+use std::sync::{Arc, Mutex, Weak, mpsc::Sender};
 use serde::Deserialize;
+use shared_child::SharedChild;
 use songbird::input::{AuxMetadata, Compose, YoutubeDl};
 use tracing::warn;
 
@@ -15,12 +13,138 @@ use crate::prelude::*;
 static mut model_list_static: Option<[Option<ModelEntry>; 512]> = None;
 
 lazy_static::lazy_static! {
-
-    pub static ref model_library: std::sync::Arc<std::sync::Mutex<ModelLibrary>> = std::sync::Arc::new(std::sync::Mutex::new(ModelLibrary::load_or_warn()));
+    static ref model_library: Arc<Mutex<ModelLibrary>> = Arc::new(Mutex::new(ModelLibrary::load_or_warn()));
+    static ref processor_queue: RVCProcessorQueue = RVCProcessorQueue::new();
 }
 
 pub fn reload() {
     *model_library.lock().unwrap() = ModelLibrary::load_or_warn();
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum RVCProcessorResult {
+    Good,
+    Canceled,
+    Error,
+}
+
+#[derive(Debug)]
+enum RVCProcessorState {
+    Wait(std::process::Command),
+    Running(Arc<SharedChild>),
+    Completed(RVCProcessorResult),
+}
+
+
+struct RVCProcessor {
+    working_dir: PathBuf,
+    state: Option<RVCProcessorState>,
+}
+
+impl RVCProcessor {
+    fn new(working_dir: PathBuf, command: std::process::Command) -> Self {
+        Self {
+            working_dir,
+            state: Some(RVCProcessorState::Wait(command))
+        }
+    }
+
+    fn run(&mut self) -> Option<Arc<SharedChild>> {
+        match self.state.take() {
+            Some(RVCProcessorState::Wait(command)) => {
+                match self.run_inner(command) {
+                    Ok(child) => {
+                        let child = Arc::new(child);
+                        self.state = Some(RVCProcessorState::Running(child.clone()));
+                        return Some(child);
+                    },
+                    Err(_) => {
+                        self.state = Some(RVCProcessorState::Completed(RVCProcessorResult::Error))
+                    }
+                }
+            },
+            Some(state) => {
+                self.state = Some(state)
+            }
+            None => {}
+        }
+
+        None
+    }
+
+    fn run_inner(&mut self, mut command: std::process::Command) -> Result<SharedChild, Error> {
+        std::fs::create_dir_all(&self.working_dir)?;
+        let child = SharedChild::spawn(&mut command)?;
+        Ok(child)
+    }
+    
+    fn completed(&mut self) {
+        match self.state.take() {
+            Some(RVCProcessorState::Running(_)) => {
+                self.state = Some(RVCProcessorState::Completed(RVCProcessorResult::Good));
+            },
+            Some(state) => self.state = Some(state),
+            None => {}
+        }
+    }
+
+    fn cancel(&mut self) {
+        let child = match self.state.take() {
+            Some(RVCProcessorState::Running(child)) => Some(child),
+            _ => None,
+        };
+
+        self.state = Some(RVCProcessorState::Completed(RVCProcessorResult::Canceled));
+
+        if let Some(child) = child {
+            child.kill().ok();
+        }
+    }
+}
+
+impl Drop for RVCProcessor {
+    fn drop(&mut self) {
+        if cfg!(debug_assertions) {
+            return;
+        }
+
+        std::fs::remove_dir_all(&self.working_dir).ok();
+    }
+}
+
+struct RVCProcessorQueue {
+    tx: Sender<Weak<Mutex<RVCProcessor>>>,
+}
+
+impl RVCProcessorQueue {
+    fn new() -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        std::thread::spawn(move || {
+            loop {
+                let processor_weak: Weak<Mutex<RVCProcessor>> = rx.recv().unwrap();
+                let processor = match processor_weak.upgrade() {
+                    Some(processor) => processor,
+                    None => continue,
+                };
+                
+                let child = processor.lock().unwrap().run();
+                if let Some(child) = child {
+                    child.wait().ok();
+                }
+
+                processor.lock().unwrap().completed();
+            }
+        });
+
+        Self {
+            tx
+        }
+    }
+
+    fn queue(&self, processor: Weak<Mutex<RVCProcessor>>) {
+        self.tx.send(processor).ok();
+    }
 }
 
 #[derive(PartialEq, Eq, Deserialize)]
@@ -266,14 +390,7 @@ pub struct RVCSong {
     pub youtube: YoutubeDl,
     pub metadata: AuxMetadata,
     pub working_dir: PathBuf,
-    pub worker: Option<std::sync::Arc<tokio::task::JoinHandle<Result<(), Error>>>>,
-    pub shared: std::sync::Arc<std::sync::Mutex<RVCSharedData>>,
-}
-
-#[derive(Default)]
-pub struct RVCSharedData {
-    output: Option<PathBuf>,
-    mp3: Option<PathBuf>,
+    processor: Arc<Mutex<RVCProcessor>>,
 }
 
 impl RVCSong {
@@ -289,311 +406,58 @@ impl RVCSong {
             .format("%y%m%d_%H%M%S_%f")
             .to_string();
         let working_dir = Path::new("temp").join("rvc").join(id);
-        let shared = std::sync::Arc::new(std::sync::Mutex::new(RVCSharedData::default()));
 
-        let metadata_thread = metadata.clone();
-        let working_dir_thread = working_dir.clone();
-        let shared_thread = shared.clone();
+        let mut command = std::process::Command::new("rvc_processor");
+        command
+            .arg(&working_dir)
+            .arg(metadata.source_url.as_ref().ok_or(Error::from("No Source URL"))?)
+            .arg(model.name)
+            .arg(pitch.unwrap_or(0).to_string())
+            .arg(export_mp3.to_string());
 
-        let worker = tokio::task::spawn_blocking(move || {
-            std::fs::create_dir_all(&working_dir_thread)?;
-
-            let find_file = |prefix: &str| -> Result<OsString, Error> {
-                let mut working_dir = std::fs::read_dir(&working_dir_thread)?;
-                let file = working_dir.find(|f| {
-                    f.as_ref().is_ok_and(|f| {
-                        f.file_name()
-                            .to_str()
-                            .is_some_and(|s| s.starts_with(prefix))
-                    })
-                });
-                Ok(file.ok_or(Error::from("cannot find file "))??.file_name())
-            };
-
-            // download
-            std::process::Command::new("yt-dlp")
-                .current_dir(&working_dir_thread)
-                .arg("-x")
-                .arg("-o")
-                .arg("source_dl")
-                .arg(
-                    metadata_thread
-                        .source_url
-                        .ok_or(Error::from("no source url"))?,
-                )
-                .output()?;
-
-            let downloaded_file = find_file("source_dl")?;
-
-            std::process::Command::new("ffmpeg")
-                .current_dir(&working_dir_thread)
-                .arg("-i")
-                .arg(&downloaded_file)
-                .arg("source.wav")
-                .output()?;
-
-            // std::fs::remove_file(working_dir_thread.join(&downloaded_file))?;
-
-            // extract with kim_vocal
-            {
-                let uvr_out = std::process::Command::new(
-                    Path::new("audio-separator")
-                        .join(".venv")
-                        .join("Scripts")
-                        .join("audio-separator.exe"),
-                )
-                .current_dir(&working_dir_thread)
-                .arg("source.wav")
-                .arg("--model_filename")
-                .arg("Kim_Vocal_2.onnx")
-                .arg("--output_format")
-                .arg("wav")
-                .output()?;
-
-                println!("uvr_out = {}", String::from_utf8_lossy(&uvr_out.stdout));
-                println!("uvr_err = {}", String::from_utf8_lossy(&uvr_out.stderr));
-
-                let source_vocals = find_file("source_(Vocals)")?;
-                let source_inst = find_file("source_(Instrumental)")?;
-
-                std::fs::rename(
-                    working_dir_thread.join(&source_vocals),
-                    working_dir_thread.join("kim_vocals.wav"),
-                )?;
-                std::fs::rename(
-                    working_dir_thread.join(&source_inst),
-                    working_dir_thread.join("kim_inst.wav"),
-                )?;
-            }
-
-            // extract with karaoke
-            {
-                let uvr_out = std::process::Command::new(
-                    Path::new("audio-separator")
-                        .join(".venv")
-                        .join("Scripts")
-                        .join("audio-separator.exe"),
-                )
-                .current_dir(&working_dir_thread)
-                .arg("kim_vocals.wav")
-                .arg("--model_filename")
-                .arg("5_HP-Karaoke-UVR.pth")
-                .arg("--output_format")
-                .arg("wav")
-                .output()?;
-
-                println!("uvr_out = {}", String::from_utf8_lossy(&uvr_out.stdout));
-                println!("uvr_err = {}", String::from_utf8_lossy(&uvr_out.stderr));
-
-                let source_vocals = find_file("kim_vocals_(Vocals)")?;
-                let source_inst = find_file("kim_vocals_(Instrumental)")?;
-
-                std::fs::rename(
-                    working_dir_thread.join(&source_vocals),
-                    working_dir_thread.join("karaoke_vocal.wav"),
-                )?;
-                std::fs::rename(
-                    working_dir_thread.join(&source_inst),
-                    working_dir_thread.join("karaoke_harmony.wav"),
-                )?;
-            }
-
-            // convert
-            {
-                let mut rvc =
-                    std::process::Command::new(Path::new("RVC_CLI").join("env").join("python.exe"));
-
-                rvc.current_dir("RVC_CLI").arg("main.py").arg("infer");
-
-                if let Some(pitch) = pitch {
-                    rvc.arg("--f0up_key").arg(pitch.to_string());
-                }
-
-                rvc.arg("--input_path")
-                    .arg(Path::new("..").join(working_dir_thread.join("karaoke_vocal.wav")))
-                    .arg("--output_path")
-                    .arg(Path::new("..").join(working_dir_thread.join("rvc.wav")))
-                    .arg("--pth_path")
-                    .arg(
-                        Path::new("rvc")
-                            .join("models")
-                            .join(model.name())
-                            .join("model.pth"),
-                    )
-                    .arg("--index_path")
-                    .arg(
-                        Path::new("rvc")
-                            .join("models")
-                            .join(model.name())
-                            .join("model.index"),
-                    );
-
-                let rvc_out = rvc.output()?;
-
-                println!("rvc_out = {}", String::from_utf8_lossy(&rvc_out.stdout));
-                println!("rvc_err = {}", String::from_utf8_lossy(&rvc_out.stderr));
-            }
-
-            // Inst pitchshift
-            {
-                match pitch.as_ref() {
-                    Some(pitch) if *pitch != 0 => {
-                        let normalized = (pitch + 6).rem_euclid(12) - 6;
-                        let freq_ratio = 2.0f64.powf(normalized as f64 / 12.0);
-
-                        let inst_shift_out = std::process::Command::new("ffmpeg")
-                            .current_dir(&working_dir_thread)
-                            .arg("-i")
-                            .arg("kim_inst.wav")
-                            .arg("-af")
-                            .arg(format!(
-                                "asetrate=44100*{freq_ratio},aresample=44100,atempo=1/{freq_ratio}"
-                            ))
-                            .arg("mix_inst.wav")
-                            .output()?;
-
-                        println!(
-                            "inst_shift_out = {}",
-                            String::from_utf8_lossy(&inst_shift_out.stdout)
-                        );
-                        println!(
-                            "inst_shift_err = {}",
-                            String::from_utf8_lossy(&inst_shift_out.stderr)
-                        );
-
-                        let harmony_shift_out = std::process::Command::new("ffmpeg")
-                            .current_dir(&working_dir_thread)
-                            .arg("-i")
-                            .arg("karaoke_harmony.wav")
-                            .arg("-af")
-                            .arg(format!(
-                                "asetrate=44100*{freq_ratio},aresample=44100,atempo=1/{freq_ratio}"
-                            ))
-                            .arg("mix_harmony.wav")
-                            .output()?;
-
-                        println!(
-                            "harmony_shift_out = {}",
-                            String::from_utf8_lossy(&harmony_shift_out.stdout)
-                        );
-                        println!(
-                            "harmony_shift_err = {}",
-                            String::from_utf8_lossy(&harmony_shift_out.stderr)
-                        );
-                    }
-                    _ => {
-                        std::fs::rename(
-                            working_dir_thread.join("kim_inst.wav"),
-                            working_dir_thread.join("mix_inst.wav"),
-                        )?;
-                        std::fs::rename(
-                            working_dir_thread.join("karaoke_harmony.wav"),
-                            working_dir_thread.join("mix_harmony.wav"),
-                        )?;
-                    }
-                }
-            }
-
-            // merge
-            {
-                let merge_inst_out = std::process::Command::new("ffmpeg")
-                    .current_dir(&working_dir_thread)
-                    .arg("-i")
-                    .arg("mix_inst.wav")
-                    .arg("-i")
-                    .arg("mix_harmony.wav")
-                    .arg("-filter_complex")
-                    .arg("[0:a][1:a]amerge=inputs=2,pan=stereo|c0=c0+c2|c1=c1+c3[a]")
-                    .arg("-map")
-                    .arg("[a]")
-                    .arg("merge_inst.wav")
-                    .output()?;
-
-                println!(
-                    "merge_inst_out = {}",
-                    String::from_utf8_lossy(&merge_inst_out.stdout)
-                );
-                println!(
-                    "merge_inst_err = {}",
-                    String::from_utf8_lossy(&merge_inst_out.stderr)
-                );
-
-                let merge_vocal_out = std::process::Command::new("ffmpeg")
-                    .current_dir(&working_dir_thread)
-                    .arg("-i")
-                    .arg("merge_inst.wav")
-                    .arg("-i")
-                    .arg("rvc.wav")
-                    .arg("-filter_complex")
-                    .arg("[0:a][1:a]amerge=inputs=2,pan=stereo|c0=c0+1.5*c2|c1=c1+1.5*c2[a]")
-                    .arg("-map")
-                    .arg("[a]")
-                    .arg("mixdown.wav")
-                    .output()?;
-
-                println!(
-                    "merge_vocal_out = {}",
-                    String::from_utf8_lossy(&merge_vocal_out.stdout)
-                );
-                println!(
-                    "merge_vocal_err = {}",
-                    String::from_utf8_lossy(&merge_vocal_out.stderr)
-                );
-            }
-
-            // mp3
-            if export_mp3 {
-                let mp3_out = std::process::Command::new("ffmpeg")
-                    .current_dir(&working_dir_thread)
-                    .arg("-i")
-                    .arg("mixdown.wav")
-                    .arg("-b:a")
-                    .arg("320k")
-                    .arg("mixdown.mp3")
-                    .output()?;
-
-                println!("mp3_out = {}", String::from_utf8_lossy(&mp3_out.stdout));
-                println!("mp3_err = {}", String::from_utf8_lossy(&mp3_out.stderr));
-            }
-
-            let mixdown_path = working_dir_thread.join("mixdown.wav");
-            let mp3_path = working_dir_thread.join("mixdown.mp3");
-
-            let mut shared = shared_thread.lock().unwrap();
-            shared.output = Some(mixdown_path);
-            shared.mp3 = Some(mp3_path);
-
-            Ok(())
-        });
-
+        let processor = Arc::new(Mutex::new(RVCProcessor::new(working_dir.clone(), command)));
+        processor_queue.queue(Arc::downgrade(&processor));
+        
         Ok(Self {
             model,
             youtube,
             metadata,
             working_dir,
-            worker: Some(std::sync::Arc::new(worker)),
-            shared,
+            processor,
         })
     }
 
-    pub async fn wait(&self) -> Result<(), Error> {
-        if let Some(worker) = self.worker.clone() {
-            tokio::task::spawn_blocking(move || while !worker.is_finished() {}).await?;
-        }
-
-        Ok(())
+    pub fn cancel(&self) {
+        self.processor.lock().unwrap().cancel();
     }
 
-    pub async fn file(&self) -> Result<PathBuf, Error> {
-        self.wait().await?;
-        let shared = self.shared.lock().unwrap();
-        shared.output.clone().ok_or(Error::from("failed"))
+    pub async fn wait(&self) -> Result<RVCProcessorResult, Error> {
+        let processor = self.processor.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            loop {
+                match processor.lock().unwrap().state {
+                    Some(RVCProcessorState::Wait(_)) => {},
+                    Some(RVCProcessorState::Running(_)) => {},
+                    Some(RVCProcessorState::Completed(result)) => {
+                        return result;
+                    }
+                    _ => {
+                        return RVCProcessorResult::Error;
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1000))
+            }
+        }).await?;
+
+        Ok(result)
     }
 
-    pub async fn mp3(&self) -> Result<PathBuf, Error> {
-        self.wait().await?;
-        let shared = self.shared.lock().unwrap();
-        shared.mp3.clone().ok_or(Error::from("failed"))
+    pub fn file(&self) -> PathBuf {
+        self.working_dir.join("mixdown.wav")
+    }
+
+    pub fn mp3(&self) -> PathBuf {
+        self.working_dir.join("mixdown.mp3")
     }
 
     pub fn title(&self, locale: Option<&str>) -> String {
@@ -602,7 +466,7 @@ impl RVCSong {
         if let Some(title) = self.metadata.title.as_ref() {
             format!("{} - {}", model_name, title)
         } else {
-            format!("{}", model_name)
+            model_name.to_string()
         }
     }
 }
@@ -615,18 +479,6 @@ impl std::fmt::Display for RVCSong {
 
 impl Drop for RVCSong {
     fn drop(&mut self) {
-        if cfg!(debug_assertion) {
-            return;
-        }
-
-        if let Some(worker) = self.worker.take() {
-            let working_dir = self.working_dir.clone();
-            tokio::spawn(async move {
-                while !worker.is_finished() {}
-                std::fs::remove_dir_all(working_dir).ok();
-            });
-        } else {
-            std::fs::remove_dir_all(&self.working_dir).ok();
-        }
+        self.processor.lock().unwrap().cancel();
     }
 }

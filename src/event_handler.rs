@@ -70,7 +70,7 @@ async fn handle_queue_delete(
     if guild_data
         .song_now
         .as_ref()
-        .map_or(false, |now| now.request.message_id == *deleted_message_id)
+        .map_or(false, |now| now.request().message_id == *deleted_message_id)
     {
         drop(guild_data);
         command::song::next_internal(ctx, *guild_id).await.ok()?;

@@ -1,5 +1,6 @@
 use crate::prelude::*;
 use serde::{Deserialize, Serialize};
+use song::RequestState;
 use std::{
     collections::{HashMap, VecDeque},
     mem,
@@ -142,21 +143,34 @@ impl Guild {
 
     pub fn song_now_complete(&mut self, ctx: &serenity::Context) {
         if let Some(now) = self.song_now.take() {
-            let ctx = ctx.clone();
-            tokio::spawn(async move {
-                now.request.react_done(&ctx).await.ok();
-            });
+            now.request().set_state_nowait(ctx.clone(), song::RequestState::Done);
+        }
+    }
+
+    pub fn song_now_cancel(&mut self, ctx: &serenity::Context) {
+        if let Some(now) = self.song_now.take() {
+            now.request().cancel();
+
+            let state = *now.request().state.lock().unwrap();
+            let new_state = match state { 
+                RequestState::Queue => RequestState::Canceled,
+                RequestState::Playing => RequestState::Skipped,
+                _ => state,
+            };
+            
+            now.request().set_state_nowait(ctx.clone(), new_state);
         }
     }
 
     pub async fn song_queue_take(&mut self, ctx: &serenity::Context) -> Option<Arc<song::Request>> {
         async fn num_queue_reactions(ctx: &serenity::Context, request: &song::Request) -> usize {
+            let emoji_queue = song::RequestState::Queue.emoji().unwrap();
             match ctx
                 .http
                 .get_reaction_users(
                     request.channel_id,
                     request.message_id,
-                    &song::Request::REACT_QUEUE.into(),
+                    &emoji_queue.into(),
                     8,
                     None,
                 )
@@ -173,13 +187,14 @@ impl Guild {
 
         // (index, priority)
         let mut max: Option<(usize, usize)> = None;
-        for queue in self
+        for (index, priority) in self
             .song_queue
             .iter()
             .map(|request| num_queue_reactions(ctx, request))
             .enumerate()
         {
-            let (index, priority) = (queue.0, queue.1.await);
+            let priority = priority.await;
+            
             let replace = match max {
                 Some((_, max_priority)) => priority > max_priority,
                 None => true,
@@ -203,7 +218,7 @@ impl Guild {
         let ctx = ctx.clone();
         tokio::spawn(async move {
             for request in song_queue {
-                request.remove_react_queue(&ctx).await.ok();
+                request.set_state_async(&ctx, song::RequestState::Canceled).await.ok();
             }
         });
     }

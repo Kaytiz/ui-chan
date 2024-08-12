@@ -63,17 +63,32 @@ async fn youtubedl_get_title_async(mut youtubedl: songbird::input::YoutubeDl, op
     None
 }
 
+pub enum InputResult{
+    Input(songbird::input::Input, std::pin::Pin<Box<dyn futures::Future<Output = Option<String>> + Send>>),
+    Canceled
+}
+
 impl Source {
-    pub async fn get_input(&self, ctx: &serenity::Context, #[allow(unused_variables)] locale: Option<&str>) -> Result<(songbird::input::Input, std::pin::Pin<Box<dyn futures::Future<Output = Option<String>> + Send>>), Error> {
+    pub async fn get_input(&self, ctx: &serenity::Context, #[allow(unused_variables)] locale: Option<&str>) -> Result<InputResult, Error> {
         match self {
             Self::Chat(_) => {
                 let source = self.get_youtube(ctx).await?;
                 let title = youtubedl_get_title_async(source.clone(), None);
-                Ok((source.into(), Box::pin(title)))
+                Ok(InputResult::Input(source.into(), Box::pin(title)))
             },
             #[cfg(feature = "rvc")]
             Self::RVC(rvc_song) => {
-                let file = rvc_song.file().await?;
+                match rvc_song.wait().await? {
+                    rvc::RVCProcessorResult::Canceled => {
+                        return Ok(InputResult::Canceled);
+                    },
+                    rvc::RVCProcessorResult::Error => {
+                        return Err(Error::from("RVC Error"));
+                    }
+                    _ => {}
+                }
+
+                let file = rvc_song.file();
 
                 if !file.exists() {
                     return Err(Error::from("RVC Failed"));
@@ -84,7 +99,7 @@ impl Source {
                     Some(title)
                 };
 
-                Ok((songbird::input::File::new(file).into(), Box::pin(title_future)))
+                Ok(InputResult::Input(songbird::input::File::new(file).into(), Box::pin(title_future)))
             }
         }
     }
@@ -134,6 +149,28 @@ impl Source {
     }
 }
 
+#[derive(Clone, Copy)]
+pub enum RequestState {
+    None,
+    Queue,
+    Playing,
+    Done,
+    Canceled,
+    Skipped,
+}
+
+impl RequestState {
+    pub fn emoji(&self) -> Option<char> {
+        match self {
+            RequestState::None => None,
+            RequestState::Queue => Some('🔖'),
+            RequestState::Playing => Some('🎵'),
+            RequestState::Done => Some('✅'),
+            RequestState::Canceled => Some('❌'),
+            RequestState::Skipped => Some('💩'),
+        }
+    }
+}
 
 pub struct Request {
     pub source: Source,
@@ -141,13 +178,11 @@ pub struct Request {
     pub author_id: serenity::UserId,
     pub channel_id: serenity::ChannelId,
     pub message_id: serenity::MessageId,
-    pub locale: Option<String>
+    pub locale: Option<String>,
+    pub state: std::sync::Arc<std::sync::Mutex<RequestState>>,
 }
 
 impl Request {
-    pub const REACT_QUEUE: char = '🔖';
-    pub const REACT_PLAYING: char = '🎵';
-    pub const REACT_DONE: char = '✅';
 
     pub fn new(
         source: Source,
@@ -164,57 +199,55 @@ impl Request {
             channel_id,
             message_id,
             locale: locale.map(Into::into),
+            state: std::sync::Arc::new(std::sync::Mutex::new(RequestState::Queue))
+        }
+    }
+
+    pub fn cancel(&self) {
+        if let Source::RVC(song) = &self.source {
+            song.cancel();
         }
     }
 
     pub async fn messge(&self, ctx: &serenity::Context) -> Option<serenity::Message> {
         ctx.http.get_message(self.channel_id, self.message_id).await.ok()
     }
-
-    pub async fn react_queue(&self, ctx: &serenity::Context) -> Result<(), serenity::Error> {
-        ctx.http
-            .create_reaction(self.channel_id, self.message_id, &Self::REACT_QUEUE.into())
-            .await
-    }
-
-    pub async fn remove_react_queue(&self, ctx: &serenity::Context) -> Result<(), serenity::Error> {
-        ctx.http
+    
+    pub async fn remove_react(&self, ctx: &serenity::Context) -> Result<(), serenity::Error> {
+        let emoji = self.state.lock().unwrap().emoji();
+        if let Some(emoji) = emoji {
+            ctx.http
             .delete_message_reaction_emoji(
                 self.channel_id,
                 self.message_id,
-                &Self::REACT_QUEUE.into(),
-            )
-            .await       
-    }
-
-    pub async fn react_playing(&self, ctx: &serenity::Context) -> Result<(), serenity::Error> {
-        ctx.http
-            .delete_message_reaction_emoji(
-                self.channel_id,
-                self.message_id,
-                &Self::REACT_QUEUE.into(),
+                &emoji.into(),
             )
             .await?;
+        }
+        Ok(())
+    }
+    
+    pub async fn add_react(&self, ctx: &serenity::Context) -> Result<(), serenity::Error> {
+        let emoji = self.state.lock().unwrap().emoji();
+        if let Some(emoji) = emoji {
             ctx.http
-                .create_reaction(
-                    self.channel_id,
-                    self.message_id,
-                    &Self::REACT_PLAYING.into(),
-                )
-                .await
+            .create_reaction(self.channel_id, self.message_id, &emoji.into())
+            .await?;
+        }
+        Ok(())
     }
 
-    pub async fn react_done(&self, ctx: &serenity::Context) -> Result<(), serenity::Error> {
-        ctx.http
-            .delete_message_reaction_emoji(
-                self.channel_id,
-                self.message_id,
-                &Self::REACT_PLAYING.into(),
-            )
-            .await?;
-            ctx.http
-                .create_reaction(self.channel_id, self.message_id, &Self::REACT_DONE.into())
-                .await
+    pub async fn set_state_async(&self, ctx: &serenity::Context, state: RequestState) -> Result<(), serenity::Error> {
+        self.remove_react(ctx).await?;
+        *self.state.lock().unwrap() = state;
+        self.add_react(ctx).await?;
+        Ok(())
+    }
+
+    pub fn set_state_nowait(self: std::sync::Arc<Request>, ctx: serenity::Context, state: RequestState) {
+        tokio::spawn(async move { 
+            self.set_state_async(&ctx, state).await.ok(); 
+        });
     }
 }
 
@@ -231,13 +264,25 @@ impl From<&serenity::Message> for Request {
     }
 }
 
-pub struct Now {
-    pub track: songbird::tracks::TrackHandle,
-    pub request: std::sync::Arc<Request>,
+pub enum Now {
+    Waiting {
+        request: std::sync::Arc<Request>
+    },
+    Playing {
+        track: songbird::tracks::TrackHandle,
+        request: std::sync::Arc<Request>,
+    }
 }
 
 impl Now {
-    pub fn new(track: songbird::tracks::TrackHandle, request: std::sync::Arc<Request>) -> Self {
-        Self { track, request }
+    pub fn request(&self) -> std::sync::Arc<Request> {
+        match self {
+            Self::Waiting { request } => {
+                request.clone()
+            },
+            Self::Playing { track: _, request } => {
+                request.clone()
+            }
+        }
     }
 }

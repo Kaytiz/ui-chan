@@ -6,6 +6,8 @@ use crate::{data, prelude::*};
 #[cfg(feature = "rvc")]
 use crate::rvc;
 
+use super::data::song;
+
 #[derive(Debug)]
 pub enum SongError {
     Guild,
@@ -66,6 +68,9 @@ struct TrackEndHandler {
 #[async_trait]
 impl songbird::EventHandler for TrackEndHandler {
     async fn act(&self, _: &songbird::EventContext<'_>) -> Option<songbird::Event> {
+        let guild_data = data::Storage::guild(&self.context, self.guild_id).await;
+        guild_data.lock().await.song_now_complete(&self.context);
+
         next_internal(&self.context, self.guild_id).await.ok();
         None
     }
@@ -82,7 +87,7 @@ impl songbird::EventHandler for DisconnectHandler {
         self.context.shard.set_activity(None);
         let guild_data = data::Storage::guild(&self.context, self.guild_id).await;
         let mut guild_data = guild_data.lock().await;
-        guild_data.song_now_complete(&self.context);
+        guild_data.song_now_cancel(&self.context);
         guild_data.song_queue_clear(&self.context);
         None
     }
@@ -106,6 +111,7 @@ pub async fn join_internal(
     guild_id: serenity::GuildId,
     author_id: serenity::UserId,
 ) -> Result<Arc<tokio::sync::Mutex<songbird::Call>>, Error> {
+
     let (guild_id, channel_id) = {
         let guild = match ctx.cache.guild(guild_id) {
             Some(guild) => guild,
@@ -128,6 +134,7 @@ pub async fn join_internal(
                     return Ok(call);
                 }
             }
+
             let call_ptr = manager.join(guild_id, channel_id).await?;
 
             // Initialize Call
@@ -171,22 +178,31 @@ pub async fn join_or_get(
 pub async fn play_internal(
     ctx: &serenity::Context,
     request: Arc<data::song::Request>,
-) -> Result<songbird::tracks::TrackHandle, Error> {
+) -> Result<Option<songbird::tracks::TrackHandle>, Error> {
     let guild_data = data::Storage::guild(ctx, request.guild_id).await;
+    guild_data.lock().await.song_now = Some(data::song::Now::Waiting{
+        request: request.clone()
+    });
 
     let (handle, title_future) = {
-        let mut guild_data = guild_data.lock().await;
-
-        let (input, title_future) = request.source.get_input(ctx, request.locale.as_deref()).await?;
-
+   
+        let (input, title_future) = match request.source.get_input(ctx, request.locale.as_deref()).await? {
+            song::InputResult::Input(input, title_future) => (input, title_future),
+            song::InputResult::Canceled => {
+                return Ok(None)
+            },
+        };
+        
         let handle = {
             let call = join_or_get(ctx, request.guild_id, Some(request.author_id)).await?;
             let mut call = call.lock().await;
             call.play_only_input(input)
         };
-
-        guild_data.song_now_complete(ctx);
-        guild_data.song_now = Some(data::song::Now::new(handle.clone(), request.clone()));
+        
+        guild_data.lock().await.song_now = Some(data::song::Now::Playing{
+            track: handle.clone(),
+            request: request.clone()
+        });
 
         (handle, title_future)
     };
@@ -205,18 +221,16 @@ pub async fn play_internal(
         },
     )?;
 
-    let ctx_clone = ctx.clone();
-    tokio::spawn(async move {
-        request.react_playing(&ctx_clone).await.ok();
-    });
+    request.set_state_nowait(ctx.clone(), song::RequestState::Playing);
 
-    Ok(handle)
+    Ok(Some(handle))
 }
 
 pub async fn queue_internal(
     ctx: &serenity::Context,
     request: std::sync::Arc<data::song::Request>,
 ) -> Result<SongCommandResult, Error> {
+
     let guild_id = request.guild_id;
     let guild_data = data::Storage::guild(ctx, guild_id).await;
 
@@ -226,8 +240,7 @@ pub async fn queue_internal(
         guild_data.song_queue.len() == 1 && guild_data.song_now.is_none()
     };
 
-    let ctx_clone = ctx.clone();
-    tokio::spawn(async move { request.react_queue(&ctx_clone).await.ok() });
+    request.set_state_nowait(ctx.clone(), song::RequestState::Queue);
 
     if first_queue {
         next_internal(ctx, guild_id).await?;
@@ -237,22 +250,19 @@ pub async fn queue_internal(
     }
 }
 
-pub async fn stop_internal(
+pub async fn cancel_internal(
     ctx: &serenity::Context,
     guild_id: serenity::GuildId,
 ) -> Result<(), Error> {
     let guild_data = data::Storage::guild(ctx, guild_id).await;
-    let mut guild_data = guild_data.lock().await;
+    guild_data.lock().await.song_now_cancel(ctx);
 
-    let call = get_internal(ctx, guild_id)
-        .await
-        .ok_or(Box::new(SongError::VoiceConnection))?;
-    let mut call = call.lock().await;
-    call.stop();
+    if let Some(call) = get_internal(ctx, guild_id).await {
+        let mut call = call.lock().await;
+        call.stop();
+    }
 
     ctx.set_activity(None);
-    guild_data.song_now_complete(ctx);
-    guild_data.song_queue_clear(ctx);
 
     Ok(())
 }
@@ -261,6 +271,7 @@ pub async fn next_internal(
     ctx: &serenity::Context,
     guild_id: serenity::GuildId,
 ) -> Result<(), Error> {
+    cancel_internal(ctx, guild_id).await?;
     let guild_data = data::Storage::guild(ctx, guild_id).await;
 
     loop
@@ -276,12 +287,11 @@ pub async fn next_internal(
                             let error_message: String = format!("error : {:?}", e);
                             message.reply(ctx, error_message).await?;
                         }
-                        next.remove_react_queue(ctx).await.ok();
+                        next.set_state_nowait(ctx.clone(), song::RequestState::Canceled);
                     },
                 }
             }
             None => {
-                stop_internal(ctx, guild_id).await?;
                 return Ok(());
             }
         }
@@ -300,13 +310,13 @@ pub async fn song(_: Context<'_>) -> Result<(), Error> {
 
 #[poise::command(slash_command)]
 pub async fn join(ctx: Context<'_>) -> Result<(), Error> {
+    ctx.reply("join").await?;
     join_internal(
         ctx.serenity_context(),
         ctx.guild_id().unwrap(),
         ctx.author().id,
     )
     .await?;
-    ctx.reply("join").await?;
     Ok(())
 }
 
@@ -325,7 +335,12 @@ pub async fn leave(ctx: Context<'_>) -> Result<(), Error> {
 #[poise::command(slash_command)]
 pub async fn stop(ctx: Context<'_>) -> Result<(), Error> {
     ctx.reply("song stop").await?;
-    stop_internal(ctx.serenity_context(), ctx.guild_id().unwrap()).await
+    cancel_internal
+(ctx.serenity_context(), ctx.guild_id().unwrap()).await?;
+
+    let guild_data = data::Storage::guild(ctx.serenity_context(), ctx.guild_id().unwrap()).await;
+    guild_data.lock().await.song_queue_clear(ctx.serenity_context());
+    Ok(())
 }
 
 #[poise::command(slash_command)]
@@ -338,20 +353,19 @@ pub async fn next(ctx: Context<'_>) -> Result<(), Error> {
 #[cfg(feature = "rvc")]
 #[poise::command(slash_command)]
 pub async fn ai(ctx: Context<'_>, singer: rvc::Model, song: String, pitch: Option<i32>, target: Option<SongRequestTarget>) -> Result<(), Error> {
-    use serenity::{CreateAttachment, CreateMessage};
+    let reply = ctx.reply("...song ai fetching").await?;
 
     let target = target.unwrap_or_default();
-
-    ctx.reply("...").await?;
-
     let youtube = data::song::Source::Chat(song).get_youtube(ctx.serenity_context()).await?;
-
-    let rvc_song = rvc::RVCSong::new(singer, youtube, pitch, target.should_download()).await?;
-
-    // reply.delete(ctx).await?;
+    let rvc_song = rvc::RVCSong::new(singer, youtube, pitch, target.should_download()).await?;    
     
     let name = rvc_song.title(ctx.locale());
-    let message = ctx.channel_id().say(ctx, &name).await?;
+    let reply_builder: poise::CreateReply = poise::CreateReply {
+        content: Some(name.clone()),
+        ..Default::default()
+    };
+    reply.edit(ctx, reply_builder).await?;
+    let message = reply.message().await?;
     
     let request = Arc::new(data::song::Request::new(
         data::song::Source::RVC(rvc_song),
@@ -368,11 +382,12 @@ pub async fn ai(ctx: Context<'_>, singer: rvc::Model, song: String, pitch: Optio
     
     if target.should_download() {
         if let data::song::Source::RVC(rvc_song) = &request.source {
-            let mp3 = rvc_song.mp3().await?;
-            let mp3 = tokio::fs::File::open(mp3).await?;
-            let message = CreateMessage::new()
-                .add_file(CreateAttachment::file(&mp3, format!("{}.mp3", name)).await?);
-            ctx.channel_id().send_message(ctx, message).await?;
+            if let rvc::RVCProcessorResult::Good = rvc_song.wait().await? {
+                let mp3 = tokio::fs::File::open(rvc_song.mp3()).await?;
+                let message = serenity::CreateMessage::new()
+                    .add_file(serenity::CreateAttachment::file(&mp3, format!("{}.mp3", name)).await?);
+                ctx.channel_id().send_message(ctx, message).await?;
+            }
         }
     }
     

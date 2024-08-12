@@ -21,24 +21,17 @@ async fn main() {
     let temp_path = std::path::Path::new("temp");
     if temp_path.exists() {
         if let Ok(read_dir) = temp_path.read_dir() {
-            for dir in read_dir {
-                if let Ok(dir) = dir {
-                    let dir_path = dir.path();
-                    if dir_path.is_dir() {
-                        std::fs::remove_dir_all(dir_path).ok();
-                    }
-                    else if dir_path.is_file() {
-                        std::fs::remove_file(dir_path).ok();
-                    }
+            for dir in read_dir.flatten() {
+                let dir_path = dir.path();
+                if dir_path.is_dir() {
+                    std::fs::remove_dir_all(dir_path).ok();
+                }
+                else if dir_path.is_file() {
+                    std::fs::remove_file(dir_path).ok();
                 }
             }
         }
     }
-
-    let spotify = {
-        let creds = rspotify::Credentials::from_env().unwrap();
-        rspotify::ClientCredsSpotify::new(creds)
-    };
 
     let token = std::env::var("DISCORD_TOKEN").expect("Expected a token in the environment");
 
@@ -54,9 +47,8 @@ async fn main() {
             },
             ..Default::default()
         })
-        .setup(|ctx, _ready, framework| {
+        .setup(|_ctx, _ready, _frameworkk| {
             Box::pin(async move {
-                poise::builtins::register_globally(ctx, &framework.options().commands).await?;
                 Ok(Data)
             })
         })
@@ -75,10 +67,15 @@ async fn main() {
 
     {
         let mut data = client.data.write().await;
+        
         data.insert::<data::SharedKey>(Arc::new(data::Shared {
             http_client: reqwest::Client::new(),
-            spotify
+            spotify: {
+                let creds = rspotify::Credentials::from_env().unwrap();
+                rspotify::ClientCredsSpotify::new(creds)
+            }
         }));
+
         data.insert::<data::StorageKey>(Arc::new(
             tokio::sync::Mutex::new(data::Storage::default()),
         ));
